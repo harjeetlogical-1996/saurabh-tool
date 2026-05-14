@@ -22,12 +22,12 @@ export default function AccountPage() {
         <Row label="Role" value={me?.role ?? "—"} />
         <Row label="Plan" value={me?.plan ?? "—"} />
         <Row
-          label="Renders used"
+          label="Minutes used"
           value={
             me
               ? me.unlimited
                 ? "∞ unlimited"
-                : `${me.rendersUsed} / ${me.renderLimit || "∞"}`
+                : `${me.minutesUsed.toFixed(1)} / ${me.minutesLimit.toFixed(0)} min`
               : "—"
           }
         />

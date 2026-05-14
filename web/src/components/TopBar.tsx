@@ -185,6 +185,16 @@ function UserMenu() {
     );
   }
 
+  // Invited-list blocked. Surface a quiet badge instead of the full
+  // user menu (the NotInvitedGate covers the body content).
+  if (state.status === "not-invited") {
+    return (
+      <span className="text-[11.5px] text-[var(--muted)] font-mono whitespace-nowrap">
+        Not invited
+      </span>
+    );
+  }
+
   const me = state.me;
   const initial = (me.name?.[0] ?? me.email[0] ?? "?").toUpperCase();
   const planLabel = me.unlimited

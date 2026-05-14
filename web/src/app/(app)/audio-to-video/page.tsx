@@ -2016,6 +2016,18 @@ function CaptionOverlay({
     neon:       { padX: "0",                          padY: "0",                            marginX: compact ? "0.4em" : "0.7em" },
     gradient:   { padX: "0",                          padY: "0",                            marginX: compact ? "0.3em" : "0.5em" },
     typewriter: { padX: compact ? "0.4em" : "0.6em",  padY: compact ? "0.16em" : "0.24em", marginX: "0" },
+    // 10 new styles — most use the bg-pill or stroke approach, so
+    // spacing mirrors a similar existing entry.
+    news:       { padX: compact ? "0.45em" : "0.7em", padY: compact ? "0.18em" : "0.28em", marginX: "0" },
+    cinema:     { padX: "0",                          padY: "0",                            marginX: compact ? "0.2em" : "0.4em" },
+    mrbeast:    { padX: "0",                          padY: "0",                            marginX: compact ? "0.4em" : "0.7em" },
+    reels:      { padX: "0",                          padY: "0",                            marginX: compact ? "0.3em" : "0.6em" },
+    tiktok:     { padX: "0",                          padY: "0",                            marginX: compact ? "0.4em" : "0.7em" },
+    whisper:    { padX: "0",                          padY: "0",                            marginX: compact ? "0.2em" : "0.4em" },
+    underline:  { padX: compact ? "0.4em" : "0.6em",  padY: compact ? "0.16em" : "0.24em", marginX: "0" },
+    sticker:    { padX: compact ? "0.5em" : "0.85em", padY: compact ? "0.22em" : "0.3em",  marginX: "0" },
+    comic:      { padX: "0",                          padY: "0",                            marginX: compact ? "0.4em" : "0.7em" },
+    retro:      { padX: "0",                          padY: "0",                            marginX: compact ? "0.3em" : "0.6em" },
   };
   const spacing = SPACING[style];
 
@@ -2192,7 +2204,7 @@ function CaptionOverlay({
           color: "#FFFFFF",
           fontSize: sizePx,
           padding: `${spacing.padY} ${spacing.padX}`,
-          fontFamily,
+          fontFamily: presetFontFamily,
           letterSpacing: "0.02em",
         }}
       >
