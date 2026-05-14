@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Env / secrets — NEVER commit
+.env
+.env.local
+.env.development.local
+.env.production.local
+
+# Generated user data — these live on Cloud Run ephemeral disk anyway
+api/uploads/
+api/outputs/
+api/previews/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Tests
+.pytest_cache/
+
+# Local dev scripts
+api/_check_*.py

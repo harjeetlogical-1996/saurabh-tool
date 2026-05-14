@@ -1,0 +1,304 @@
+@import "tailwindcss";
+
+:root {
+  /* Primary */
+  --bg: #0a0a0a;
+  --fg: #ffffff;
+  /* Neutrals */
+  --surface: #111113;
+  --charcoal: #1a1a1a;
+  --charcoal-2: #161617;
+  --line: #2a2a2a;
+  --line-2: #3a3a3a;
+  --muted: #a0a0a0;
+  --muted-2: #6b6b6b;
+  /* Accent — same Electric Cyan as the marketing site */
+  --accent: #00f0ff;
+  --accent-deep: #00c4d1;
+  --accent-glow: rgba(0, 240, 255, 0.18);
+  /* Tool-specific tones (subtle differentiation from marketing site) */
+  --canvas: #0d0d10;       /* slightly bluer than --bg, feels app-y */
+  --rail: #0e0e11;         /* sidebar background */
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-fg: var(--fg);
+  --color-surface: var(--surface);
+  --color-canvas: var(--canvas);
+  --color-rail: var(--rail);
+  --color-charcoal: var(--charcoal);
+  --color-line: var(--line);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-mono);
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans), Poppins, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.015em;
+  font-weight: 400;
+}
+
+::selection {
+  background: var(--accent);
+  color: #0a0a0a;
+}
+
+/* ---------- Typography utilities ---------- */
+/* Space Grotesk is the display face — matches the marketing site for
+   brand consistency. Poppins remains body via --font-sans. */
+@utility font-display {
+  font-family: var(--font-display), "Space Grotesk", Poppins, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+}
+@utility font-display-light {
+  font-family: var(--font-display), "Space Grotesk", Poppins, sans-serif;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+}
+@utility font-mono {
+  font-family: var(--font-mono), "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---------- Backgrounds ---------- */
+@utility bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 64px 64px;
+}
+
+@utility bg-dots {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+/* ---------- Subtle cyan glow for primary CTAs only ---------- */
+@utility glow-cyan {
+  box-shadow:
+    0 0 0 1px rgba(0, 240, 255, 0.4),
+    0 0 24px rgba(0, 240, 255, 0.25),
+    0 0 60px rgba(0, 240, 255, 0.15);
+}
+
+/* ---------- Animation-style preview keyframes ---------------------- */
+/* Each one mimics the corresponding ffmpeg zoompan motion as closely as
+   the browser allows. Loops continuously inside the preview cards so the
+   user sees the motion without hovering or playing anything. */
+
+@keyframes anim-ken-burns {
+  0%   { transform: scale(1.05) translate(0, 0); }
+  50%  { transform: scale(1.18) translate(-3%, -2%); }
+  100% { transform: scale(1.05) translate(0, 0); }
+}
+@keyframes anim-zoom-in {
+  0%   { transform: scale(1.0); }
+  100% { transform: scale(1.30); }
+}
+@keyframes anim-zoom-out {
+  0%   { transform: scale(1.30); }
+  100% { transform: scale(1.0); }
+}
+@keyframes anim-pan-lr {
+  0%   { transform: scale(1.15) translate(-8%, 0); }
+  100% { transform: scale(1.15) translate(8%, 0); }
+}
+@keyframes anim-pan-rl {
+  0%   { transform: scale(1.15) translate(8%, 0); }
+  100% { transform: scale(1.15) translate(-8%, 0); }
+}
+@keyframes anim-pulse {
+  0%, 100% { transform: scale(1.06); }
+  50%      { transform: scale(1.20); }
+}
+
+/* Caption preview "pop" — fades in + slight scale up whenever the
+   visible style/phrase changes. Matches the natural in-and-hold feel
+   of real burned-in captions cutting from one line to the next. */
+@keyframes caption-pop {
+  0%   { opacity: 0;   transform: translateY(6px) scale(0.92); }
+  35%  { opacity: 1;   transform: translateY(0)   scale(1.04); }
+  60%  { opacity: 1;   transform: translateY(0)   scale(1.0);  }
+  100% { opacity: 1;   transform: translateY(0)   scale(1.0);  }
+}
+.caption-pop {
+  animation: caption-pop 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  display: inline-block;
+}
+
+/* "Mixed" preview: 6 motion stages back-to-back so users can see at a
+   glance that each scene gets a different animation. */
+@keyframes anim-mixed {
+  0%   { transform: scale(1.05) translate(0, 0); }
+  16%  { transform: scale(1.18) translate(-3%, -2%); }      /* ken burns */
+  17%  { transform: scale(1.0); }
+  33%  { transform: scale(1.30); }                            /* zoom in */
+  34%  { transform: scale(1.15) translate(-8%, 0); }
+  50%  { transform: scale(1.15) translate(8%, 0); }           /* pan lr */
+  51%  { transform: scale(1.06); }
+  58%  { transform: scale(1.20); }
+  66%  { transform: scale(1.06); }                            /* pulse */
+  67%  { transform: scale(1.30); }
+  83%  { transform: scale(1.0); }                              /* zoom out */
+  84%  { transform: scale(1.15) translate(8%, 0); }
+  100% { transform: scale(1.15) translate(-8%, 0); }           /* pan rl */
+}
+
+@utility anim-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform-origin: center;
+  animation-duration: 4s;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+  will-change: transform;
+}
+@utility anim-ken-burns { animation-name: anim-ken-burns; }
+@utility anim-zoom-in   { animation-name: anim-zoom-in;   animation-direction: alternate; }
+@utility anim-zoom-out  { animation-name: anim-zoom-out;  animation-direction: alternate; }
+@utility anim-pan-lr    { animation-name: anim-pan-lr;    animation-direction: alternate; }
+@utility anim-pan-rl    { animation-name: anim-pan-rl;    animation-direction: alternate; }
+@utility anim-pulse     { animation-name: anim-pulse; }
+@utility anim-mixed     { animation-name: anim-mixed;     animation-duration: 8s; animation-timing-function: linear; }
+
+/* Form inputs default look — used everywhere across the tools */
+@utility tool-input {
+  display: block;
+  width: 100%;
+  height: 2.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  padding: 0 0.75rem;
+  font-size: 14px;
+  color: var(--fg);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.tool-input::placeholder {
+  color: var(--muted);
+}
+.tool-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* ============================================================
+   Polish animations — subtle, app-y feel without being noisy.
+   ============================================================ */
+
+/* Fade + slight rise on initial mount. Use on hero rows, top
+   sections, anything you want to land softly when the page opens. */
+@keyframes fade-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@utility animate-fade-rise {
+  animation: fade-rise 480ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Staggered variant — combine with inline style="animation-delay:Nms" */
+@utility animate-fade-rise-delay {
+  animation: fade-rise 480ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: var(--reveal-delay, 80ms);
+}
+
+/* Soft horizontal drift — used on the cyan accent dot for a subtle
+   alive-feel that's calmer than animate-blink. */
+@keyframes hover-float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-3px); }
+}
+@utility animate-hover-float {
+  animation: hover-float 3.2s ease-in-out infinite;
+}
+
+/* Slow drift used by the bg-grid for an ambient "live" feel. */
+@keyframes anim-drift {
+  0%   { transform: translate(0, 0); }
+  100% { transform: translate(-64px, -64px); }
+}
+@utility animate-drift {
+  animation: anim-drift 30s linear infinite;
+}
+
+/* Blink dot — same as marketing site, used for "live / online" pills. */
+@keyframes anim-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+@utility animate-blink {
+  animation: anim-blink 1.4s ease-in-out infinite;
+}
+
+/* Spring hover — apply to interactive cards. They lift, accent border
+   warms, soft cyan glow appears underneath. */
+@utility card-spring {
+  transition:
+    transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    border-color 220ms ease,
+    box-shadow 220ms ease;
+}
+.card-spring:hover {
+  transform: translateY(-3px);
+  box-shadow:
+    0 14px 40px -18px rgba(0, 240, 255, 0.18),
+    0 6px 20px -10px rgba(0, 0, 0, 0.6);
+}
+
+/* Sweep — diagonal cyan shimmer that runs across primary CTAs on hover. */
+@keyframes cta-sweep {
+  0%   { transform: translateX(-120%) skewX(-12deg); }
+  100% { transform: translateX(220%) skewX(-12deg); }
+}
+@utility cta-sweep {
+  position: relative;
+  overflow: hidden;
+}
+.cta-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.18) 50%,
+    transparent 100%
+  );
+  transform: translateX(-120%) skewX(-12deg);
+}
+.cta-sweep:hover::after {
+  animation: cta-sweep 850ms ease;
+}
+
+/* Slow rotation utility (used on tiny logomark accent). Borrowed from
+   the marketing site's animate-spin-slow. */
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@utility animate-spin-slow {
+  animation: spin-slow 8s linear infinite;
+}
+
+/* Hide scrollbar but keep scroll working — used on horizontal category
+   tab strips and any narrow scroller where a visible bar steals
+   readable width and looks ugly. */
+@utility scrollbar-hide {
+  scrollbar-width: none;            /* Firefox */
+  -ms-overflow-style: none;         /* IE / old Edge */
+  &::-webkit-scrollbar { display: none; }
+}
