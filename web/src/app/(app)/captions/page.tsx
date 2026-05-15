@@ -1559,9 +1559,10 @@ function DraggableCaption({
       <span
         className="inline-block leading-none tracking-tight"
         style={{
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
           color: "#FFE04A",
           fontSize: "clamp(15px, 4.4cqh, 34px)",
-          fontWeight: 900,
+          fontWeight: 400,
           paintOrder: "stroke fill",
           WebkitTextStroke: "5px #000",
           textShadow:
@@ -1574,10 +1575,12 @@ function DraggableCaption({
   } else if (opts.style === "reels") {
     captionEl = (
       <span
-        className="inline-block font-black leading-tight tracking-wide"
+        className="inline-block leading-tight tracking-wide"
         style={{
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
           color: "#B6FF3C",
           fontSize: "clamp(13px, 4cqh, 30px)",
+          fontWeight: 400,
           paintOrder: "stroke fill",
           WebkitTextStroke: "4px #000",
           textShadow:
@@ -1590,10 +1593,12 @@ function DraggableCaption({
   } else if (opts.style === "tiktok") {
     captionEl = (
       <span
-        className="inline-block font-extrabold leading-tight"
+        className="inline-block leading-tight"
         style={{
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
           color: "#FFFFFF",
           fontSize: "clamp(12px, 3.6cqh, 26px)",
+          fontWeight: 400,
           paintOrder: "stroke fill",
           WebkitTextStroke: "4px #FF1493",
           textShadow:
@@ -1654,11 +1659,12 @@ function DraggableCaption({
       <span
         className="inline-block leading-none tracking-tight"
         style={{
+          fontFamily: 'var(--font-bangers), "Bangers", "Impact", system-ui',
           color: "#FFE04A",
-          fontSize: "clamp(13px, 4cqh, 30px)",
-          fontWeight: 900,
+          fontSize: "clamp(16px, 4.6cqh, 36px)",
+          fontWeight: 400,
           paintOrder: "stroke fill",
-          WebkitTextStroke: "4px #000",
+          WebkitTextStroke: "3px #000",
           textShadow:
             "1px 1px 0 #000, 2px 2px 0 #000, 3px 3px 0 rgba(0,0,0,0.6)",
         }}
@@ -1669,10 +1675,12 @@ function DraggableCaption({
   } else if (opts.style === "retro") {
     captionEl = (
       <span
-        className="inline-block font-extrabold leading-tight tracking-wide"
+        className="inline-block leading-tight tracking-wide"
         style={{
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
           color: "#FFC107",
           fontSize: "clamp(12px, 3.6cqh, 26px)",
+          fontWeight: 400,
           paintOrder: "stroke fill",
           WebkitTextStroke: "3px #B30000",
           textShadow:

@@ -43,7 +43,7 @@ export default function WorkspaceHome() {
           href="/captions"
           eyebrow="Video · Captions"
           title="Caption your videos"
-          blurb="Bulk-upload finished videos and burn captions in. Eight styles, position control, transcript cached so style swaps are free."
+          blurb="Bulk-upload finished videos and burn captions in. 18 styles + per-render customize, drag-to-position, transcript cached so style swaps are free."
           status="ready"
         />
       </div>
@@ -62,29 +62,29 @@ export default function WorkspaceHome() {
             <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/10 text-[var(--accent)] text-[11px] font-mono font-semibold">
               1
             </span>
-            <span>
-              Open{" "}
-              <Link
-                href="/settings/api-keys"
-                className="text-[var(--accent)] underline underline-offset-2 hover:text-[var(--accent-deep)]"
-              >
-                Settings → API keys
-              </Link>{" "}
-              and paste your Gemini API key.
-            </span>
+            <span>Pick a tool above. Audio→Video for AI-generated visuals, Captions for finished clips.</span>
           </li>
           <li className="flex items-start gap-3">
             <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/10 text-[var(--accent)] text-[11px] font-mono font-semibold">
               2
             </span>
-            <span>Open the Audio to Video tool, upload an MP3, hit render.</span>
+            <span>
+              See{" "}
+              <Link
+                href="/pricing"
+                className="text-[var(--accent)] underline underline-offset-2 hover:text-[var(--accent-deep)]"
+              >
+                pricing
+              </Link>{" "}
+              for plan minutes. Plans start free; upgrade anytime from the user menu.
+            </span>
           </li>
           <li className="flex items-start gap-3">
             <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/10 text-[var(--accent)] text-[11px] font-mono font-semibold">
               3
             </span>
             <span className="text-[var(--muted)]">
-              Free tier: 1 lifetime render. After that, ₹100/month for unlimited.
+              On bring-your-own-key plans, save your Gemini key in Settings → API keys first.
             </span>
           </li>
         </ol>

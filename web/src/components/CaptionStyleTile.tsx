@@ -312,8 +312,9 @@ function StyledPhrase({
       <span
         className="inline-block leading-none tracking-tight"
         style={{
-          fontSize: "13px",
-          fontWeight: 900,
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
+          fontSize: "15px",
+          fontWeight: 400,
           color: "#FFE04A",
           paintOrder: "stroke fill",
           WebkitTextStroke: "3px #000",
@@ -321,16 +322,18 @@ function StyledPhrase({
             "0 2px 0 #000, 0 3px 4px rgba(0,0,0,0.7)",
         }}
       >
-        {words.join(" ")}
+        {words.join(" ").toUpperCase()}
       </span>
     );
   }
   if (style === "reels") {
     return (
       <span
-        className="inline-block font-black leading-tight tracking-wide"
+        className="inline-block leading-tight tracking-wide"
         style={{
-          fontSize: "12.5px",
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
+          fontSize: "14px",
+          fontWeight: 400,
           color: "#B6FF3C",
           paintOrder: "stroke fill",
           WebkitTextStroke: "2px #000",
@@ -338,16 +341,18 @@ function StyledPhrase({
             "0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000",
         }}
       >
-        {words.join(" ")}
+        {words.join(" ").toUpperCase()}
       </span>
     );
   }
   if (style === "tiktok") {
     return (
       <span
-        className="inline-block font-extrabold leading-tight"
+        className="inline-block leading-tight"
         style={{
-          fontSize: "14px",
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
+          fontSize: "15px",
+          fontWeight: 400,
           color: "#FFFFFF",
           paintOrder: "stroke fill",
           WebkitTextStroke: "2px #FF1493",
@@ -413,26 +418,28 @@ function StyledPhrase({
       <span
         className="inline-block leading-none tracking-tight"
         style={{
-          fontSize: "12.5px",
-          fontWeight: 900,
+          fontFamily: 'var(--font-bangers), "Bangers", "Impact", system-ui',
+          fontSize: "16px",
+          fontWeight: 400,
           color: "#FFE04A",
           paintOrder: "stroke fill",
-          WebkitTextStroke: "3px #000",
+          WebkitTextStroke: "2.5px #000",
           textShadow:
             "1px 1px 0 #000, 2px 2px 0 #000, 3px 3px 0 rgba(0,0,0,0.5)",
-          fontFamily: '"Bangers", "Impact", system-ui',
         }}
       >
-        {words.join(" ")}
+        {words.join(" ").toUpperCase()}
       </span>
     );
   }
   if (style === "retro") {
     return (
       <span
-        className="inline-block font-extrabold leading-tight tracking-wide"
+        className="inline-block leading-tight tracking-wide"
         style={{
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
           fontSize: "13px",
+          fontWeight: 400,
           color: "#FFC107",
           paintOrder: "stroke fill",
           WebkitTextStroke: "2px #B30000",
@@ -441,7 +448,7 @@ function StyledPhrase({
           letterSpacing: "0.06em",
         }}
       >
-        {words.join(" ")}
+        {words.join(" ").toUpperCase()}
       </span>
     );
   }

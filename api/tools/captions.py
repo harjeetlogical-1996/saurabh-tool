@@ -584,6 +584,7 @@ STYLE_PRESETS = {
 
     # SOCIAL-MEDIA TRENDY
     # MrBeast bold — fat yellow letters, jet-black thick outline + drop shadow.
+    # Anton's condensed-bold weight gives the chunky display look.
     "mrbeast": {
         "label": "MrBeast",
         "primary": "yellow",
@@ -597,6 +598,7 @@ STYLE_PRESETS = {
         "uppercase": True,
         "use_back": False,
         "category": "trendy",
+        "fontname": "Anton",
     },
     # Reels green — neon-lime caps, classic Instagram-Reels aesthetic.
     "reels": {
@@ -611,6 +613,7 @@ STYLE_PRESETS = {
         "uppercase": True,
         "use_back": False,
         "category": "trendy",
+        "fontname": "Anton",
     },
     # TikTok pop — hot-pink bold with white outline + pink halo shadow.
     "tiktok": {
@@ -625,6 +628,7 @@ STYLE_PRESETS = {
         "bold": True,
         "use_back": False,
         "category": "trendy",
+        "fontname": "Anton",
     },
 
     # MINIMAL
@@ -685,6 +689,7 @@ STYLE_PRESETS = {
         "uppercase": True,
         "use_back": False,
         "category": "decorative",
+        "fontname": "Bangers",
     },
     # Retro — amber-on-black, evokes 80s VHS / arcade marquees.
     "retro": {
@@ -700,6 +705,7 @@ STYLE_PRESETS = {
         "uppercase": True,
         "use_back": False,
         "category": "decorative",
+        "fontname": "Anton",
     },
 }
 

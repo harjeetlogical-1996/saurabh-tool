@@ -1048,11 +1048,20 @@ function RecentRenderCard({
   // progress / done). Drives the on-thumb overlay.
   const [captionPreview, setCaptionPreview] =
     useState<CaptionPreviewSpec | null>(null);
+  // Drag-set fractional position (lifted up here so the modal's video
+  // overlay and CaptionsPanel's submit() can both read it).
+  const [captionPosX, setCaptionPosX] = useState<number | null>(null);
+  const [captionPosY, setCaptionPosY] = useState<number | null>(null);
 
   // Drawer closed → drop any stale preview so the overlay disappears
-  // even if CaptionsPanel was unmounted before its cleanup ran.
+  // even if CaptionsPanel was unmounted before its cleanup ran. Also
+  // reset the drag position so reopening starts fresh.
   useEffect(() => {
-    if (!captionsOpen) setCaptionPreview(null);
+    if (!captionsOpen) {
+      setCaptionPreview(null);
+      setCaptionPosX(null);
+      setCaptionPosY(null);
+    }
   }, [captionsOpen]);
 
   // Captions tab can show "(N done)" hint when there's an active job.
@@ -1257,6 +1266,12 @@ function RecentRenderCard({
           onRefresh={onRefresh}
           captionPreview={captionPreview}
           onPreviewChange={setCaptionPreview}
+          posXFrac={captionPosX}
+          posYFrac={captionPosY}
+          onPositionChange={(x, y) => {
+            setCaptionPosX(x);
+            setCaptionPosY(y);
+          }}
         />
       )}
     </div>
@@ -1762,6 +1777,9 @@ function CaptionsModal({
   onRefresh,
   captionPreview,
   onPreviewChange,
+  posXFrac,
+  posYFrac,
+  onPositionChange,
 }: {
   parentJob: Job;
   captionsJob?: Job;
@@ -1770,7 +1788,14 @@ function CaptionsModal({
   onRefresh?: () => Promise<void> | void;
   captionPreview: CaptionPreviewSpec | null;
   onPreviewChange: (spec: CaptionPreviewSpec | null) => void;
+  /** Current drag-set position (null = use discrete `position` anchor). */
+  posXFrac: number | null;
+  posYFrac: number | null;
+  onPositionChange: (xFrac: number, yFrac: number) => void;
 }) {
+  // Stage ref so the draggable overlay can clamp pointer-deltas to the
+  // visible video frame.
+  const stageRef = useRef<HTMLDivElement>(null);
   // When a captioned render is active on the parent, default to showing
   // the BURNED mp4 so the user actually sees their finished captions —
   // not a demo overlay sitting on the original. They can flip back to
@@ -1828,8 +1853,14 @@ function CaptionsModal({
         {/* LEFT — video preview with live caption overlay */}
         <div className="md:flex-1 md:min-w-0 bg-black flex items-center justify-center p-4 md:p-6">
           <div
+            ref={stageRef}
             className={`relative ${aspectCls} w-full max-h-[80vh] mx-auto bg-black rounded-lg overflow-hidden`}
-            style={{ maxWidth: "min(100%, calc(80vh * 9 / 16))" }}
+            style={{
+              maxWidth: "min(100%, calc(80vh * 9 / 16))",
+              // containerType on the STAGE so the caption's cqh/cqw
+              // font + width units resolve against the video frame.
+              containerType: "size",
+            }}
           >
             <video
               src={url}
@@ -1840,21 +1871,33 @@ function CaptionsModal({
               className="absolute inset-0 w-full h-full object-contain"
             />
             {/* Demo overlay only when we're showing the ORIGINAL frame —
-                stacking it on the burned mp4 would double the captions. */}
+                stacking it on the burned mp4 would double the captions.
+                Wrapped in DraggableCaptionFrame so the user can drag the
+                caption to any position on the video (matches the
+                Captions tool's drag UX). */}
             {captionPreview && !showingBurned && (
-              <CaptionOverlay
-                style={captionPreview.style}
+              <DraggableCaptionFrame
+                stageRef={stageRef}
                 position={captionPreview.position}
-                wordsPerLine={captionPreview.wordsPerLine}
-                primaryColor={captionPreview.primaryColor ?? null}
-                outlineColor={captionPreview.outlineColor ?? null}
-                outlineWidth={captionPreview.outlineWidth ?? null}
-                bgColor={captionPreview.bgColor ?? null}
-                bgAlpha={captionPreview.bgAlpha ?? null}
-                fontSize={captionPreview.fontSize ?? null}
-                fontFamily={captionPreview.fontFamily ?? null}
-                shadow={captionPreview.shadow ?? null}
-              />
+                posXFrac={posXFrac}
+                posYFrac={posYFrac}
+                onMove={onPositionChange}
+              >
+                <CaptionOverlay
+                  style={captionPreview.style}
+                  position={captionPreview.position}
+                  wordsPerLine={captionPreview.wordsPerLine}
+                  primaryColor={captionPreview.primaryColor ?? null}
+                  outlineColor={captionPreview.outlineColor ?? null}
+                  outlineWidth={captionPreview.outlineWidth ?? null}
+                  bgColor={captionPreview.bgColor ?? null}
+                  bgAlpha={captionPreview.bgAlpha ?? null}
+                  fontSize={captionPreview.fontSize ?? null}
+                  fontFamily={captionPreview.fontFamily ?? null}
+                  shadow={captionPreview.shadow ?? null}
+                  embedded
+                />
+              </DraggableCaptionFrame>
             )}
             {/* One-click toggle between burned mp4 and original.
                 Only meaningful once a captioned render exists. */}
@@ -1893,10 +1936,108 @@ function CaptionsModal({
               aspectCls={aspectCls}
               onRefresh={onRefresh}
               onPreviewChange={onPreviewChange}
+              posXFrac={posXFrac}
+              posYFrac={posYFrac}
+              onPositionChange={onPositionChange}
               hideHeader
             />
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Wraps the caption preview in a drag-handle. When the user drags the
+ * caption around the video, we report new fractional coords back up so
+ * the next render burns at that exact position.
+ *
+ * Falls back to the discrete `position` ("top" / "middle" / "bottom")
+ * anchor if no drag has happened yet (posXFrac / posYFrac null).
+ */
+function DraggableCaptionFrame({
+  stageRef,
+  position,
+  posXFrac,
+  posYFrac,
+  onMove,
+  children,
+}: {
+  stageRef: React.RefObject<HTMLDivElement | null>;
+  position: "top" | "middle" | "bottom";
+  posXFrac: number | null;
+  posYFrac: number | null;
+  onMove: (xFrac: number, yFrac: number) => void;
+  children: React.ReactNode;
+}) {
+  const [dragging, setDragging] = useState(false);
+  const [hovered, setHovered] = useState(false);
+
+  // Default anchor (no drag yet): centered horizontally, V from preset.
+  const xFrac = posXFrac ?? 0.5;
+  const yFrac =
+    posYFrac ??
+    (position === "top" ? 0.1 : position === "middle" ? 0.5 : 0.9);
+
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    const stage = stageRef.current;
+    if (!stage) return;
+    e.preventDefault();
+    e.stopPropagation();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    setDragging(true);
+    const rect = stage.getBoundingClientRect();
+    const initX = e.clientX;
+    const initY = e.clientY;
+    const initXFrac = xFrac;
+    const initYFrac = yFrac;
+
+    function clamp(v: number) {
+      return Math.max(0.02, Math.min(0.98, v));
+    }
+    function move(ev: PointerEvent) {
+      const dx = (ev.clientX - initX) / rect.width;
+      const dy = (ev.clientY - initY) / rect.height;
+      onMove(clamp(initXFrac + dx), clamp(initYFrac + dy));
+    }
+    function up() {
+      setDragging(false);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  return (
+    <div
+      aria-hidden
+      onPointerDown={onPointerDown}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
+      className="absolute z-10 select-none"
+      style={{
+        left: `${xFrac * 100}%`,
+        top: `${yFrac * 100}%`,
+        transform: "translate(-50%, -50%)",
+        cursor: dragging ? "grabbing" : "grab",
+        outline:
+          hovered || dragging
+            ? "1.5px dashed var(--accent)"
+            : "1.5px dashed transparent",
+        outlineOffset: "6px",
+        borderRadius: "4px",
+        transition: dragging ? "none" : "outline-color 120ms",
+        touchAction: "none",
+      }}
+    >
+      {/* nowrap so the caption stays on one line same as backend ASS
+          render (WrapStyle 2). */}
+      <div className="inline-block text-center" style={{ whiteSpace: "nowrap" }}>
+        {children}
       </div>
     </div>
   );
@@ -1915,12 +2056,15 @@ function CaptionsModal({
  * `compact=true` switches to thumb-sized text (used on the small grid
  * card thumbnails). `compact=false` (default) is sized for the bigger
  * modal player.
+ * `embedded=true` skips the overlay's own absolute positioning so a
+ * parent wrapper (e.g. DraggableCaptionFrame) can place it instead.
  */
 function CaptionOverlay({
   style,
   position,
   wordsPerLine = 2,
   compact = false,
+  embedded = false,
   // Optional Customize overrides. When any is set the overlay
   // switches to an "effective values" render that matches what the
   // backend will burn into the final mp4.
@@ -1940,6 +2084,9 @@ function CaptionOverlay({
    *  phrase length on the live preview. */
   wordsPerLine?: number;
   compact?: boolean;
+  /** When true, skip the overlay's own absolute positioning so a parent
+   *  wrapper (DraggableCaptionFrame) can place it. */
+  embedded?: boolean;
   primaryColor?: string | null;
   outlineColor?: string | null;
   outlineWidth?: number | null;
@@ -2211,6 +2358,179 @@ function CaptionOverlay({
         {text}
       </span>
     );
+  } else if (style === "news") {
+    captionEl = (
+      <span
+        className="inline-block font-bold leading-tight"
+        style={{
+          background: "#B30000",
+          color: "#FFFFFF",
+          fontSize: sizePx,
+          padding: "0.22em 0.8em",
+          letterSpacing: "0.02em",
+        }}
+      >
+        {text}
+      </span>
+    );
+  } else if (style === "cinema") {
+    captionEl = (
+      <span
+        className="inline-block leading-tight"
+        style={{
+          color: "#FFFFFF",
+          fontSize: sizePx,
+          fontWeight: 500,
+          fontStyle: "italic",
+          textShadow:
+            "0 1px 3px rgba(0,0,0,0.95), 0 0 6px rgba(0,0,0,0.7)",
+        }}
+      >
+        {text}
+      </span>
+    );
+  } else if (style === "mrbeast") {
+    captionEl = (
+      <span
+        className="inline-block leading-none tracking-tight"
+        style={{
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
+          color: "#FFE04A",
+          fontSize: sizePx,
+          fontWeight: 400,
+          margin: `0 ${spacing.marginX}`,
+          paintOrder: "stroke fill",
+          WebkitTextStroke: `${compact ? "2.4px" : "5px"} #000`,
+          textShadow:
+            "0 3px 0 #000, 0 5px 8px rgba(0,0,0,0.7)",
+        }}
+      >
+        {text.toUpperCase()}
+      </span>
+    );
+  } else if (style === "reels") {
+    captionEl = (
+      <span
+        className="inline-block leading-tight tracking-wide"
+        style={{
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
+          color: "#B6FF3C",
+          fontSize: sizePx,
+          fontWeight: 400,
+          margin: `0 ${spacing.marginX}`,
+          paintOrder: "stroke fill",
+          WebkitTextStroke: `${compact ? "2px" : "4px"} #000`,
+          textShadow:
+            "0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000",
+        }}
+      >
+        {text.toUpperCase()}
+      </span>
+    );
+  } else if (style === "tiktok") {
+    captionEl = (
+      <span
+        className="inline-block leading-tight"
+        style={{
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
+          color: "#FFFFFF",
+          fontSize: sizePx,
+          fontWeight: 400,
+          margin: `0 ${spacing.marginX}`,
+          paintOrder: "stroke fill",
+          WebkitTextStroke: `${compact ? "2px" : "4px"} #FF1493`,
+          textShadow:
+            "0 0 10px rgba(255,20,147,0.7), 0 0 20px rgba(255,20,147,0.4)",
+        }}
+      >
+        {text}
+      </span>
+    );
+  } else if (style === "whisper") {
+    captionEl = (
+      <span
+        className="inline-block leading-tight"
+        style={{
+          color: "#C0C0C0",
+          fontSize: sizePx,
+          fontWeight: 400,
+          letterSpacing: "0.04em",
+        }}
+      >
+        {text.toLowerCase()}
+      </span>
+    );
+  } else if (style === "underline") {
+    captionEl = (
+      <span
+        className="inline-block font-semibold leading-tight"
+        style={{
+          color: "#FFFFFF",
+          fontSize: sizePx,
+          padding: "0.12em 0.55em",
+          background:
+            "linear-gradient(to top, rgba(0,240,255,0.65) 0%, rgba(0,240,255,0.65) 22%, transparent 22%)",
+        }}
+      >
+        {text}
+      </span>
+    );
+  } else if (style === "sticker") {
+    captionEl = (
+      <span
+        className="inline-block font-bold leading-tight"
+        style={{
+          background: "#000",
+          color: "#FFF1D0",
+          fontSize: sizePx,
+          padding: "0.25em 0.85em",
+          border: "3px solid #FFF",
+          borderRadius: "999px",
+          boxShadow: "0 3px 0 rgba(0,0,0,0.45), 0 6px 14px rgba(0,0,0,0.4)",
+        }}
+      >
+        {text}
+      </span>
+    );
+  } else if (style === "comic") {
+    captionEl = (
+      <span
+        className="inline-block leading-none tracking-tight"
+        style={{
+          fontFamily: 'var(--font-bangers), "Bangers", "Impact", system-ui',
+          color: "#FFE04A",
+          fontSize: sizePx,
+          fontWeight: 400,
+          margin: `0 ${spacing.marginX}`,
+          paintOrder: "stroke fill",
+          WebkitTextStroke: `${compact ? "1.6px" : "3px"} #000`,
+          textShadow:
+            "1px 1px 0 #000, 2px 2px 0 #000, 3px 3px 0 rgba(0,0,0,0.6)",
+        }}
+      >
+        {text.toUpperCase()}
+      </span>
+    );
+  } else if (style === "retro") {
+    captionEl = (
+      <span
+        className="inline-block leading-tight tracking-wide"
+        style={{
+          fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
+          color: "#FFC107",
+          fontSize: sizePx,
+          fontWeight: 400,
+          margin: `0 ${spacing.marginX}`,
+          paintOrder: "stroke fill",
+          WebkitTextStroke: `${compact ? "1.6px" : "3px"} #B30000`,
+          textShadow:
+            "0 0 10px rgba(255,193,7,0.65), 0 0 18px rgba(179,0,0,0.5)",
+          letterSpacing: "0.06em",
+        }}
+      >
+        {text.toUpperCase()}
+      </span>
+    );
   } else {
     // karaoke
     captionEl = (
@@ -2260,6 +2580,17 @@ function CaptionOverlay({
   // just clicked.
   const animKey = `${style}-${wordsPerLine}-${safeIdx}`;
 
+  // Embedded mode: parent (DraggableCaptionFrame) handles positioning,
+  // so just emit the inner phrase. Standalone mode: do the absolute
+  // positioning ourselves like before.
+  if (embedded) {
+    return (
+      <span key={animKey} className="caption-pop inline-block">
+        {captionEl}
+      </span>
+    );
+  }
+
   return (
     <div
       aria-hidden
@@ -2297,12 +2628,20 @@ function CaptionsPanel({
   aspectCls,
   onRefresh,
   onPreviewChange,
+  posXFrac = null,
+  posYFrac = null,
+  onPositionChange,
   hideHeader = false,
 }: {
   parentJob: Job;
   captionsJob?: Job;
   aspectCls: string;
   onRefresh?: () => Promise<void> | void;
+  /** Drag-set position (null = use discrete anchor). Owned by JobCard so
+   *  CaptionsModal's video overlay + this panel's submit stay in sync. */
+  posXFrac?: number | null;
+  posYFrac?: number | null;
+  onPositionChange?: (xFrac: number, yFrac: number) => void;
   /** Fires whenever the user picks a different style/position so the
    *  parent can render a live overlay on the video thumb. Receives null
    *  when the user is no longer actively editing. */
@@ -2441,6 +2780,9 @@ function CaptionsPanel({
         wordsPerLine,
         uppercase,
       };
+      // Drag position wins over the discrete anchor when set.
+      if (posXFrac !== null) payload.posXFrac = posXFrac;
+      if (posYFrac !== null) payload.posYFrac = posYFrac;
       if (primaryColor) payload.primaryColor = primaryColor;
       if (outlineColor) payload.outlineColor = outlineColor;
       if (outlineWidth !== null) payload.outlineWidth = outlineWidth;
@@ -2687,9 +3029,16 @@ function CaptionsPanel({
 
               {/* Position */}
               <div>
-                <span className="block text-[10px] uppercase tracking-[0.18em] text-[var(--muted)] font-mono mb-1.5">
-                  Position
-                </span>
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <span className="text-[10px] uppercase tracking-[0.18em] text-[var(--muted)] font-mono">
+                    Position
+                  </span>
+                  {(posXFrac !== null || posYFrac !== null) && (
+                    <span className="text-[10px] text-[var(--accent)] font-mono">
+                      dragged
+                    </span>
+                  )}
+                </div>
                 <div className="flex gap-1.5">
                   {CAPTION_POSITIONS.map((p) => {
                     const isActive = position === p.v;
@@ -2710,6 +3059,9 @@ function CaptionsPanel({
                     );
                   })}
                 </div>
+                <p className="mt-1.5 text-[10.5px] text-[var(--muted)]">
+                  Or drag the caption directly on the video.
+                </p>
               </div>
 
               {/* Words per line */}
