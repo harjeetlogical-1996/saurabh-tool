@@ -218,11 +218,14 @@ export default function BulkCaptionsPage() {
     setSubmitting(true);
     setSubmitError(null);
     setSubmitNotice(null);
-    // Chunk size — chosen so a typical batch of mobile/reel videos
-    // (10-50MB each) fits well within Cloud Run's request budget even
-    // on slow uplinks. 5 keeps each HTTP request small and recoverable;
-    // 50 files in one POST routinely hit timeouts / proxy limits.
-    const CHUNK_SIZE = 5;
+    // Chunk size = 1. Cloud Run HTTP/1.1 caps the request body at
+    // 32MB; reel videos routinely hit 20-30MB each, so even 2 files
+    // in one POST blows the limit and the proxy 502s before FastAPI
+    // sees the request. One file per request keeps every upload
+    // safely under the cap regardless of how many videos the user
+    // selected — they all still merge into the same project via
+    // projectId passthrough.
+    const CHUNK_SIZE = 1;
     try {
       // First chunk creates the project (server generates an id when
       // none is supplied). Subsequent chunks reuse that id so all the
