@@ -4,7 +4,11 @@
 # Includes ffmpeg + ffprobe in the runtime image because the audio→video
 # and caption tools shell out to them per render.
 
-FROM python:3.13-slim-bookworm AS runtime
+# Python 3.12 (not 3.13) because faster-whisper's `av` dependency
+# (PyAV 12.x) doesn't publish manylinux wheels for 3.13 yet, and
+# building from source pulls in the full libav* dev headers and adds
+# ~15 min to the build. 3.12 has prebuilt wheels for every dep.
+FROM python:3.12-slim-bookworm AS runtime
 WORKDIR /app
 
 # System deps:
