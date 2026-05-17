@@ -527,6 +527,7 @@ export default function BulkCaptionsPage() {
           if (!lastUsedOpts) return;
           await runBulkApply(parentIds, lastUsedOpts);
         }}
+        onApplyOptsToParents={runBulkApply}
       />
     </div>
   );
@@ -1995,6 +1996,7 @@ function Library({
   bulkNotice,
   bulkError,
   onApplyToAll,
+  onApplyOptsToParents,
 }: {
   jobs: Job[];
   rendersByParent: Map<string, Job[]>;
@@ -2006,6 +2008,13 @@ function Library({
   bulkNotice: string | null;
   bulkError: string | null;
   onApplyToAll: (parentIds: string[]) => Promise<void> | void;
+  /** Variant used by the per-project "Apply style of 1st video" button:
+   *  caller passes the opts pulled from the project's first done render
+   *  + the sibling parent ids to apply them to. */
+  onApplyOptsToParents: (
+    parentIds: string[],
+    opts: RenderOpts,
+  ) => Promise<void> | void;
 }) {
   // Show 4 projects per page in the "Ready" section. Anything older
   // collapses under a "Show more" button so the page doesn't grow
@@ -2152,34 +2161,102 @@ function Library({
               Paginated so a user with 50 projects doesn't have to
               scroll forever — older projects load behind "Show more". */}
           <div className="space-y-4">
-            {visibleReadyGroups.map((group) => (
-              <div
-                key={group.projectId ?? "unfiled"}
-                className="rounded-lg border border-[var(--line)] bg-[var(--surface)]/40 p-3"
-              >
-                <div className="flex items-center justify-between gap-3 mb-3 px-1 flex-wrap">
-                  <div className="flex items-center gap-3">
-                    <h3 className="text-[12px] font-mono uppercase tracking-[0.18em] text-[var(--accent)]">
-                      {group.projectName}
-                    </h3>
-                    <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--muted)]">
-                      {group.jobs.length} video{group.jobs.length === 1 ? "" : "s"}
-                    </span>
+            {visibleReadyGroups.map((group) => {
+              // Find this project's first parent that has at least one
+              // completed render — its style/position/customize values
+              // are what "Apply style of 1st video" will replay onto
+              // every sibling. Walks the project's job order (newest
+              // first, but we iterate naturally — first match wins).
+              let firstRenderedParent: Job | null = null;
+              let firstRender: Job | null = null;
+              for (const j of group.jobs) {
+                const r = (rendersByParent.get(j.id) ?? []).find(
+                  (x) => x.status === "done",
+                );
+                if (r) {
+                  firstRenderedParent = j;
+                  firstRender = r;
+                  break;
+                }
+              }
+              const siblingsToApply = firstRenderedParent
+                ? group.jobs
+                    .filter((j) => j.id !== firstRenderedParent!.id)
+                    .map((j) => j.id)
+                : [];
+              const renderedCount = group.jobs.filter((j) =>
+                (rendersByParent.get(j.id) ?? []).some(
+                  (r) => r.status === "done",
+                ),
+              ).length;
+              const zipUrl = group.projectId && renderedCount > 0
+                ? apiClient.projectZipUrl(group.projectId)
+                : null;
+              return (
+                <div
+                  key={group.projectId ?? "unfiled"}
+                  className="rounded-lg border border-[var(--line)] bg-[var(--surface)]/40 p-3"
+                >
+                  <div className="flex items-center justify-between gap-3 mb-3 px-1 flex-wrap">
+                    <div className="flex items-center gap-3">
+                      <h3 className="text-[12px] font-mono uppercase tracking-[0.18em] text-[var(--accent)]">
+                        {group.projectName}
+                      </h3>
+                      <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--muted)]">
+                        {group.jobs.length} video{group.jobs.length === 1 ? "" : "s"}
+                        {renderedCount > 0 && ` · ${renderedCount} captioned`}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {/* "Apply style of 1st video" — visible only when
+                          we have a rendered video + at least one sibling
+                          that hasn't been captioned yet with that style. */}
+                      {firstRender && siblingsToApply.length > 0 && (
+                        <button
+                          type="button"
+                          disabled={bulkBusy}
+                          onClick={() => {
+                            const opts = optsFromRenderJob(firstRender!);
+                            if (opts) {
+                              onApplyOptsToParents(siblingsToApply, opts);
+                            }
+                          }}
+                          className="text-[10px] font-mono uppercase tracking-[0.18em] px-3 py-1.5 rounded-full border border-[var(--line)] hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50"
+                          title="Bulk-apply the style of the first captioned video to the rest of this project"
+                        >
+                          {bulkBusy
+                            ? "Submitting…"
+                            : `Apply style of 1st video to ${siblingsToApply.length} more`}
+                        </button>
+                      )}
+                      {/* "Download all" — ZIP of every done render in
+                          this project. Backend's /me/projects/{id}/zip
+                          streams them all in one archive. */}
+                      {zipUrl && (
+                        <a
+                          href={zipUrl}
+                          download
+                          className="text-[10px] font-mono uppercase tracking-[0.18em] px-3 py-1.5 rounded-full bg-[var(--accent)] text-black hover:bg-[var(--accent-deep)]"
+                        >
+                          Download all ({renderedCount})
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {group.jobs.map((j) => (
+                      <TranscribedCard
+                        key={j.id}
+                        job={j}
+                        renders={rendersByParent.get(j.id) ?? []}
+                        isEditing={editingId === j.id}
+                        onEdit={() => onEdit(j.id)}
+                      />
+                    ))}
                   </div>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {group.jobs.map((j) => (
-                    <TranscribedCard
-                      key={j.id}
-                      job={j}
-                      renders={rendersByParent.get(j.id) ?? []}
-                      isEditing={editingId === j.id}
-                      onEdit={() => onEdit(j.id)}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
+              );
+            })}
             {hasMoreReady && (
               <div className="flex items-center justify-center pt-2">
                 <button
@@ -2317,6 +2394,36 @@ function ProgressCard({ job }: { job: Job }) {
     </div>
   );
 }
+
+/** Pull the render options off a bulk-captions-render Job's `params`
+ *  field so we can replay them as RenderOpts for a bulk-apply submit.
+ *  Mirrors the backend shape — see api/tools/bulk_captions_render.py
+ *  where the worker reads `params.options`. Returns null if the shape
+ *  doesn't look like a render job (e.g. a transcribe-only parent). */
+function optsFromRenderJob(job: Job): RenderOpts | null {
+  const params = (job.params ?? {}) as Record<string, unknown>;
+  const o = params.options as Record<string, unknown> | undefined;
+  if (!o) return null;
+  const num = (v: unknown) => (typeof v === "number" ? v : null);
+  const str = (v: unknown) => (typeof v === "string" ? v : null);
+  return {
+    style: (o.style as CaptionStyle) ?? "plain",
+    position: (o.position as "top" | "middle" | "bottom") ?? "bottom",
+    wordsPerLine: typeof o.wordsPerLine === "number" ? o.wordsPerLine : 3,
+    uppercase: !!o.uppercase,
+    posXFrac: num(o.posXFrac),
+    posYFrac: num(o.posYFrac),
+    primaryColor: str(o.primaryColor),
+    outlineColor: str(o.outlineColor),
+    outlineWidth: num(o.outlineWidth),
+    bgColor: str(o.bgColor),
+    bgAlpha: num(o.bgAlpha),
+    fontSize: num(o.fontSize),
+    fontFamily: str(o.fontFamily),
+    shadow: num(o.shadow),
+  };
+}
+
 
 /** Group bulk-captions transcribe jobs by their projectId, preserving
  *  the input array's order (which is already newest-first). Jobs that
