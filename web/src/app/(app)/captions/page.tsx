@@ -853,7 +853,19 @@ function Editor({
     apiClient
       .getTranscript(job.id)
       .then((t) => {
-        if (!cancelled) setTranscript(t);
+        if (!cancelled) {
+          setTranscript(t);
+          // When running inside the voice-pair iframe modal, the parent
+          // page is showing a "Loading editor…" overlay. Once the
+          // transcript lands the editor is actually usable, so signal
+          // ready up so the overlay can fade out.
+          if (typeof window !== "undefined" && window.parent !== window) {
+            window.parent.postMessage(
+              { type: "captions-editor-ready" },
+              "*",
+            );
+          }
+        }
       })
       .catch((e) => {
         if (!cancelled) {

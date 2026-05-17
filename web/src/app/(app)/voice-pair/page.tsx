@@ -130,6 +130,15 @@ export default function VoicePairPage() {
   // whichever video the user clicked "Open captions editor" on; null
   // means the modal is closed.
   const [editorJobId, setEditorJobId] = useState<string | null>(null);
+  // Pre-warm strategy: as soon as ONE captioned transcribe is ready
+  // we mount a hidden iframe pointing at that job. When the user
+  // clicks "Open captions editor" we either:
+  //   - flip it visible immediately if it's already loaded, OR
+  //   - if they clicked a different video, switch the iframe src
+  //     (still cheaper than mounting fresh) and show a loader until
+  //     the captions page postMessages back that the transcript loaded.
+  const [prewarmJobId, setPrewarmJobId] = useState<string | null>(null);
+  const [editorReady, setEditorReady] = useState(false);
   // Bulk "apply same style to all" — state shared across all project
   // cards so only one bulk job runs at a time and per-project notices
   // surface cleanly. Keyed by projectId so the right card shows status.
@@ -268,13 +277,17 @@ export default function VoicePairPage() {
     [refresh],
   );
 
-  // Listen for "editor-closed" postMessage from the embedded captions
-  // iframe so we can dismiss the modal when the user hits the close
-  // button inside the editor. Same-origin check is implicit (iframe
-  // lives at the same /captions route), so we just match on the type.
+  // Listen for postMessages from the embedded captions iframe:
+  //   - "captions-editor-ready" → transcript fetched, OK to drop loader
+  //   - "captions-editor-closed" → user hit close, dismiss the modal
+  // Same-origin check is implicit (iframe lives at the same /captions
+  // route), so we just match on the type.
   useEffect(() => {
     function onMsg(e: MessageEvent) {
-      if (e.data && e.data.type === "captions-editor-closed") {
+      if (!e.data || typeof e.data.type !== "string") return;
+      if (e.data.type === "captions-editor-ready") {
+        setEditorReady(true);
+      } else if (e.data.type === "captions-editor-closed") {
         setEditorJobId(null);
         // Pick up any renders the editor kicked off while open so the
         // voice-pair card flips to its final state without a manual reload.
@@ -284,6 +297,31 @@ export default function VoicePairPage() {
     window.addEventListener("message", onMsg);
     return () => window.removeEventListener("message", onMsg);
   }, [refresh]);
+
+  // Pre-warm the iframe with the first ready captions transcribe so
+  // the user's first click on "Open captions editor" feels instant.
+  // We only set the prewarm id once — subsequent video opens will
+  // re-target the same iframe (cheaper than mounting a new one).
+  useEffect(() => {
+    if (prewarmJobId) return;
+    for (const [, capJob] of chainedCaptions) {
+      if (capJob.status === "done") {
+        setPrewarmJobId(capJob.id);
+        break;
+      }
+    }
+  }, [chainedCaptions, prewarmJobId]);
+
+  // When the user clicks Open on a DIFFERENT video than the prewarmed
+  // one, the iframe needs to navigate. Reset the ready flag so the
+  // loader shows again until the new transcript lands.
+  useEffect(() => {
+    if (!editorJobId) return;
+    if (editorJobId !== prewarmJobId) {
+      setEditorReady(false);
+      setPrewarmJobId(editorJobId);
+    }
+  }, [editorJobId, prewarmJobId]);
 
   useEffect(() => {
     refresh();
@@ -790,23 +828,50 @@ export default function VoicePairPage() {
           editor inherits the user's session cookie automatically. The
           embed flag tells the captions page to hide its library chrome
           (no point showing the user OTHER videos here) and to
-          postMessage back when the editor closes. */}
-      {editorJobId && (
-        <div className="fixed inset-0 z-[60] bg-[var(--bg)]">
-          <button
-            type="button"
-            onClick={() => setEditorJobId(null)}
-            className="absolute top-3 right-3 z-[61] inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-white text-[18px] leading-none hover:bg-black/80"
-            aria-label="Close captions editor"
-          >
-            ×
-          </button>
+          postMessage back when the editor closes.
+
+          Pre-warm: the iframe is MOUNTED as soon as any captioned
+          transcribe is ready (hidden offscreen via fixed positioning
+          + invisible) so by the time the user clicks Open it's
+          already loaded. When the user opens a DIFFERENT video the
+          src updates and a loader covers it until the editor
+          postMessages back that the transcript is ready. */}
+      {prewarmJobId && (
+        <>
           <iframe
-            src={`/captions?open=${editorJobId}&embed=1`}
-            className="w-full h-full border-0"
+            // Same-origin, same component instance — switching src is
+            // a normal navigation that keeps the Next.js runtime warm.
+            src={`/captions?open=${prewarmJobId}&embed=1`}
+            className={
+              editorJobId
+                ? "fixed inset-0 z-[60] w-full h-full border-0 bg-[var(--bg)]"
+                : "fixed -left-[10000px] top-0 w-[1px] h-[1px] border-0 opacity-0 pointer-events-none"
+            }
             title="Captions editor"
           />
-        </div>
+          {editorJobId && (
+            <>
+              <button
+                type="button"
+                onClick={() => setEditorJobId(null)}
+                className="fixed top-3 right-3 z-[62] inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-white text-[18px] leading-none hover:bg-black/80"
+                aria-label="Close captions editor"
+              >
+                ×
+              </button>
+              {!editorReady && (
+                <div className="fixed inset-0 z-[61] flex items-center justify-center bg-[var(--bg)]">
+                  <div className="text-center">
+                    <div className="inline-block h-10 w-10 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" />
+                    <p className="mt-4 text-[13px] font-mono text-[var(--muted)]">
+                      Loading editor…
+                    </p>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </>
       )}
     </div>
   );
