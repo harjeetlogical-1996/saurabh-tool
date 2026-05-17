@@ -2243,110 +2243,23 @@ function Library({
                 ? apiClient.projectZipUrl(group.projectId)
                 : null;
               return (
-                <div
+                <ProjectGroupCard
                   key={group.projectId ?? "unfiled"}
-                  className="rounded-lg border border-[var(--line)] bg-[var(--surface)]/40 p-3"
-                >
-                  <div className="flex items-center justify-between gap-3 mb-2 px-1 flex-wrap">
-                    <div className="flex items-center gap-3 flex-wrap">
-                      <h3 className="text-[12px] font-mono uppercase tracking-[0.18em] text-[var(--accent)]">
-                        {group.projectName}
-                      </h3>
-                      <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--muted)]">
-                        {group.jobs.length} video{group.jobs.length === 1 ? "" : "s"}
-                      </span>
-                      {/* Live counters — visible as soon as a bulk apply
-                          starts so the user knows how many are still
-                          processing vs done vs failed. */}
-                      {renderedCount > 0 && (
-                        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--accent)]">
-                          ✓ {renderedCount} done
-                        </span>
-                      )}
-                      {renderingCount > 0 && (
-                        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-yellow-300 inline-flex items-center gap-1.5">
-                          <span className="h-1.5 w-1.5 rounded-full bg-yellow-300 animate-pulse" />
-                          {renderingCount} rendering
-                        </span>
-                      )}
-                      {failedRenderCount > 0 && (
-                        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-red-400">
-                          ✕ {failedRenderCount} failed
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {/* "Apply style of 1st video" — visible only when
-                          we have a rendered video + at least one sibling
-                          that hasn't been captioned yet with that style. */}
-                      {firstRender && siblingsToApply.length > 0 && (
-                        <button
-                          type="button"
-                          disabled={bulkBusy}
-                          onClick={() => {
-                            const opts = optsFromRenderJob(firstRender!);
-                            if (opts) {
-                              onApplyOptsToParents(siblingsToApply, opts);
-                            }
-                          }}
-                          className="text-[10px] font-mono uppercase tracking-[0.18em] px-3 py-1.5 rounded-full border border-[var(--line)] hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50"
-                          title="Bulk-apply the style of the first captioned video to the rest of this project"
-                        >
-                          {bulkBusy
-                            ? "Submitting…"
-                            : `Apply style of 1st video to ${siblingsToApply.length} more`}
-                        </button>
-                      )}
-                      {/* "Download all" — ZIP of every done render in
-                          this project. Backend's /me/projects/{id}/zip
-                          streams them all in one archive. */}
-                      {zipUrl && (
-                        <a
-                          href={zipUrl}
-                          download
-                          className="text-[10px] font-mono uppercase tracking-[0.18em] px-3 py-1.5 rounded-full bg-[var(--accent)] text-black hover:bg-[var(--accent-deep)]"
-                        >
-                          Download all ({renderedCount})
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                  {/* Project-level progress bar — only visible while
-                      any video in the project is rendering or some are
-                      already done. Gives the user a single glanceable
-                      indicator for the bulk-apply state. */}
-                  {(renderingCount > 0 || renderedCount > 0) && (
-                    <div className="mb-3 px-1">
-                      <div className="h-1.5 w-full rounded-full bg-black/40 overflow-hidden">
-                        <div
-                          className={`h-full transition-all ${
-                            renderingCount > 0
-                              ? "bg-yellow-300"
-                              : "bg-[var(--accent)]"
-                          }`}
-                          style={{ width: `${progressPct}%` }}
-                        />
-                      </div>
-                      <div className="mt-1 flex items-center justify-between text-[10px] font-mono text-[var(--muted)]">
-                        <span>
-                          {renderedCount} / {totalForProgress} captioned
-                        </span>
-                        <span>{progressPct}%</span>
-                      </div>
-                    </div>
-                  )}
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {group.jobs.map((j) => (
-                      <TranscribedCard
-                        key={j.id}
-                        job={j}
-                        renders={rendersByParent.get(j.id) ?? []}
-                        isEditing={editingId === j.id}
-                        onEdit={() => onEdit(j.id)}
-                      />
-                    ))}
-                  </div>
-                </div>
+                  group={group}
+                  rendersByParent={rendersByParent}
+                  editingId={editingId}
+                  onEdit={onEdit}
+                  renderedCount={renderedCount}
+                  renderingCount={renderingCount}
+                  failedRenderCount={failedRenderCount}
+                  totalForProgress={totalForProgress}
+                  progressPct={progressPct}
+                  firstRender={firstRender}
+                  siblingsToApply={siblingsToApply}
+                  zipUrl={zipUrl}
+                  bulkBusy={bulkBusy}
+                  onApplyOpts={onApplyOptsToParents}
+                />
               );
             })}
             {hasMoreReady && (
@@ -2542,6 +2455,166 @@ function groupTranscribesByProject(jobs: Job[]): {
     projectName: buckets.get(pid)!.projectName,
     jobs: buckets.get(pid)!.jobs,
   }));
+}
+
+
+/** A single project's card on the "Ready to caption" section. Owns
+ *  its own collapse state so a 50-video project doesn't drown out the
+ *  smaller projects on the page. Header surfaces the most relevant
+ *  signal (progress when active, "all done" when done, video count
+ *  otherwise) without piling up every counter. */
+function ProjectGroupCard({
+  group,
+  rendersByParent,
+  editingId,
+  onEdit,
+  renderedCount,
+  renderingCount,
+  failedRenderCount,
+  totalForProgress,
+  progressPct,
+  firstRender,
+  siblingsToApply,
+  zipUrl,
+  bulkBusy,
+  onApplyOpts,
+}: {
+  group: { projectId: string | null; projectName: string; jobs: Job[] };
+  rendersByParent: Map<string, Job[]>;
+  editingId: string | null;
+  onEdit: (id: string) => void;
+  renderedCount: number;
+  renderingCount: number;
+  failedRenderCount: number;
+  totalForProgress: number;
+  progressPct: number;
+  firstRender: Job | null;
+  siblingsToApply: string[];
+  zipUrl: string | null;
+  bulkBusy: boolean;
+  onApplyOpts: (parentIds: string[], opts: RenderOpts) => Promise<void> | void;
+}) {
+  // Collapsed-by-default once the project is fully captioned. Active
+  // projects (with anything still rendering) stay expanded so the user
+  // can see live status without an extra click. New project (no
+  // renders yet) also starts expanded.
+  const fullyDone = renderingCount === 0 && renderedCount === totalForProgress;
+  const [expanded, setExpanded] = useState(!fullyDone);
+
+  // Pick one status line for the header — only the most relevant.
+  // Active > failed > done > idle. Keeps the row visually quiet.
+  let statusEl: React.ReactNode = null;
+  if (renderingCount > 0) {
+    statusEl = (
+      <span className="text-[11px] font-mono uppercase tracking-[0.16em] text-yellow-300 inline-flex items-center gap-1.5">
+        <span className="h-1.5 w-1.5 rounded-full bg-yellow-300 animate-pulse" />
+        {renderingCount} rendering · {renderedCount}/{totalForProgress} done
+      </span>
+    );
+  } else if (failedRenderCount > 0) {
+    statusEl = (
+      <span className="text-[11px] font-mono uppercase tracking-[0.16em] text-red-400">
+        ✕ {failedRenderCount} failed · {renderedCount}/{totalForProgress} done
+      </span>
+    );
+  } else if (renderedCount > 0) {
+    statusEl = (
+      <span className="text-[11px] font-mono uppercase tracking-[0.16em] text-[var(--accent)]">
+        ✓ {renderedCount}/{totalForProgress} captioned
+      </span>
+    );
+  } else {
+    statusEl = (
+      <span className="text-[11px] font-mono uppercase tracking-[0.16em] text-[var(--muted)]">
+        {totalForProgress} video{totalForProgress === 1 ? "" : "s"}
+      </span>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)]/40 overflow-hidden">
+      {/* Header row — single line on desktop, wraps on mobile. */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-white/5 transition-colors"
+        aria-expanded={expanded}
+      >
+        <span
+          aria-hidden
+          className={`text-[var(--muted)] text-[12px] transition-transform ${expanded ? "rotate-90" : ""}`}
+        >
+          ▶
+        </span>
+        <h3 className="flex-1 text-[14px] font-medium text-white truncate">
+          {group.projectName}
+        </h3>
+        {statusEl}
+      </button>
+
+      {/* Progress bar — slim, always visible at the bottom of the
+          header so the user can see overall state even when collapsed. */}
+      {(renderingCount > 0 || renderedCount > 0) && (
+        <div className="h-[3px] w-full bg-black/30">
+          <div
+            className={`h-full transition-all ${
+              renderingCount > 0 ? "bg-yellow-300" : "bg-[var(--accent)]"
+            }`}
+            style={{ width: `${progressPct}%` }}
+          />
+        </div>
+      )}
+
+      {expanded && (
+        <div className="px-4 py-4 border-t border-[var(--line)] space-y-4">
+          {/* Action row — only renders when there's something to do.
+              Cleaner than always-on buttons since most projects (no
+              first render yet) skip the row entirely. */}
+          {(firstRender && siblingsToApply.length > 0) || zipUrl ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              {firstRender && siblingsToApply.length > 0 && (
+                <button
+                  type="button"
+                  disabled={bulkBusy}
+                  onClick={() => {
+                    const opts = optsFromRenderJob(firstRender!);
+                    if (opts) onApplyOpts(siblingsToApply, opts);
+                  }}
+                  className="text-[11px] font-mono uppercase tracking-[0.16em] px-3 py-1.5 rounded-full border border-[var(--line)] hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50"
+                  title="Apply the first captioned video's style to the rest of this project"
+                >
+                  {bulkBusy
+                    ? "Submitting…"
+                    : `Apply 1st style → ${siblingsToApply.length}`}
+                </button>
+              )}
+              {zipUrl && (
+                <a
+                  href={zipUrl}
+                  download
+                  className="text-[11px] font-mono uppercase tracking-[0.16em] px-3 py-1.5 rounded-full bg-[var(--accent)] text-black hover:bg-[var(--accent-deep)]"
+                >
+                  Download all ({renderedCount})
+                </a>
+              )}
+            </div>
+          ) : null}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {group.jobs.map((j) => (
+              <TranscribedCard
+                key={j.id}
+                job={j}
+                renders={rendersByParent.get(j.id) ?? []}
+                isEditing={editingId === j.id}
+                onEdit={() => onEdit(j.id)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 
