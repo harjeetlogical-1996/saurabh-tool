@@ -16,6 +16,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -139,6 +140,10 @@ export default function VoicePairPage() {
   //     the captions page postMessages back that the transcript loaded.
   const [prewarmJobId, setPrewarmJobId] = useState<string | null>(null);
   const [editorReady, setEditorReady] = useState(false);
+  // Ref to the editor iframe so we can pause/mute its video when the
+  // user closes the modal — otherwise the iframe stays mounted (for
+  // pre-warm) and the video keeps playing in the background.
+  const editorIframeRef = useRef<HTMLIFrameElement | null>(null);
   // Bulk "apply same style to all" — state shared across all project
   // cards so only one bulk job runs at a time and per-project notices
   // surface cleanly. Keyed by projectId so the right card shows status.
@@ -322,6 +327,29 @@ export default function VoicePairPage() {
       setPrewarmJobId(editorJobId);
     }
   }, [editorJobId, prewarmJobId]);
+
+  // Modal closed → pause any video playing inside the iframe. The
+  // iframe itself stays mounted (so the next Open click is instant),
+  // but the captions-editor video element would keep blasting audio
+  // in the background otherwise. Same-origin so we can reach in.
+  useEffect(() => {
+    if (editorJobId) return;
+    const f = editorIframeRef.current;
+    if (!f) return;
+    try {
+      const vids = f.contentDocument?.querySelectorAll("video");
+      vids?.forEach((v) => {
+        try {
+          v.pause();
+        } catch {
+          /* ignore */
+        }
+      });
+    } catch {
+      // contentDocument can throw under some browser security paths;
+      // pre-warm still works, we just can't pause. Best-effort.
+    }
+  }, [editorJobId]);
 
   useEffect(() => {
     refresh();
@@ -839,6 +867,7 @@ export default function VoicePairPage() {
       {prewarmJobId && (
         <>
           <iframe
+            ref={editorIframeRef}
             // Same-origin, same component instance — switching src is
             // a normal navigation that keeps the Next.js runtime warm.
             src={`/captions?open=${prewarmJobId}&embed=1`}

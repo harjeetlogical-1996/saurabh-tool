@@ -1801,29 +1801,97 @@ def download_project_zip(
     project_name = docs[0].get("projectName") or "project"
     safe_name = re.sub(r"[^\w\-]+", "_", project_name).strip("_") or "project"
 
+    # Index voice-pair → chained captions transcribes by parent vp id.
+    # (Transcribes carry projectId so they're in `docs` already.)
+    chained_cap_by_vp: dict[str, dict] = {}
+    # Every transcribe job in this project — both auto-chained from
+    # voice-pair AND user-uploaded via the captions tool. We fetch the
+    # latest captioned render for ALL of them so the ZIP contains the
+    # final deliverable regardless of how captions were produced.
+    transcribe_ids: list[str] = []
+    for d in docs:
+        params = d.get("params") or {}
+        if d.get("tool") == "bulk-captions":
+            transcribe_ids.append(str(d["_id"]))
+            vp_parent = params.get("fromVoicePairJobId")
+            if vp_parent:
+                chained_cap_by_vp[str(vp_parent)] = d
+
+    # bulk-captions-render jobs DON'T carry projectId (they're children
+    # of transcribe jobs), so the project query above missed them.
+    # Second query: latest done render per transcribe in this project.
+    cap_render_by_parent: dict[str, dict] = {}
+    if transcribe_ids:
+        for d in db().tool_jobs.find({
+            "userId": user.id,
+            "tool": "bulk-captions-render",
+            "status": "done",
+            "params.parentJobId": {"$in": transcribe_ids},
+        }):
+            params = d.get("params") or {}
+            pid = str(params.get("parentJobId") or "")
+            if not pid:
+                continue
+            existing = cap_render_by_parent.get(pid)
+            if not existing or (
+                d.get("updatedAt") and (not existing.get("updatedAt") or d["updatedAt"] > existing["updatedAt"])
+            ):
+                cap_render_by_parent[pid] = d
+
+    def _resolve_output_for_zip(doc: dict) -> tuple[Optional[str], str]:
+        """Return (file_path, suffix_hint) for the chosen variant of
+        this job. Returns the CAPTIONED mp4 when one was rendered;
+        otherwise falls back to the parent's own outputPath."""
+        tool = doc.get("tool")
+        if tool == "voice-pair":
+            cap_job = chained_cap_by_vp.get(str(doc["_id"]))
+            if cap_job:
+                render = cap_render_by_parent.get(str(cap_job["_id"]))
+                if render:
+                    rp = render.get("outputPath")
+                    if rp and Path(rp).exists():
+                        return rp, "_captioned"
+        elif tool == "bulk-captions":
+            # User-uploaded captions tool path. Prefer the latest render.
+            render = cap_render_by_parent.get(str(doc["_id"]))
+            if render:
+                rp = render.get("outputPath")
+                if rp and Path(rp).exists():
+                    return rp, "_captioned"
+        return doc.get("outputPath"), ""
+
     # In-memory zip. For large projects (~100 mp4s) we'd want a temp
     # file, but for typical 5-20 file submits this is fine and lets us
     # stream the response without writing intermediate disk state.
+    # Iterate over the "primary" jobs only (voice-pair / audio-to-video /
+    # bulk-captions transcribes) so we don't double-include both the raw
+    # voice-pair render AND its captioned variant — we serve only the
+    # latter when available, only the former otherwise.
+    PRIMARY_TOOLS = {"voice-pair", "audio-to-video", "bulk-captions"}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
         for doc in docs:
-            out_path = doc.get("outputPath")
+            if doc.get("tool") not in PRIMARY_TOOLS:
+                continue
+            # Skip transcribe-only jobs that came from a voice-pair (the
+            # voice-pair parent already handles its captioned variant).
+            params = doc.get("params") or {}
+            if doc.get("tool") == "bulk-captions" and params.get("fromVoicePairJobId"):
+                continue
+            out_path, suffix = _resolve_output_for_zip(doc)
             if not out_path:
                 continue
             fp = Path(out_path)
             if not fp.exists():
                 continue
-            # Pick a friendly arcname: prefer the source filename if known.
-            params = doc.get("params") or {}
             base = (
                 params.get("audioFilename")
                 or params.get("videoFilename")
                 or params.get("mediaFilename")
                 or fp.name
             )
-            arcname = f"{Path(base).stem}{fp.suffix}"
             # Avoid duplicate names by suffixing with the job id tail.
-            arcname = f"{Path(base).stem}_{str(doc['_id'])[-6:]}{fp.suffix}"
+            arcname = f"{Path(base).stem}{suffix}_{str(doc['_id'])[-6:]}{fp.suffix}"
             zf.write(str(fp), arcname=arcname)
     buf.seek(0)
 

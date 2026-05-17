@@ -84,10 +84,19 @@ export function CaptionStyleTile({
     // (declared in cqh below) come out at the SAME visual proportions
     // as the rendered mp4. Without containerType:size, cqh units don't
     // resolve and everything collapses to default font size.
+    //
+    // We set aspectRatio inline (instead of Tailwind's aspect-[9/16])
+    // because Tailwind v4 sometimes drops the arbitrary aspect class
+    // when the parent is a `<button>` — leaving the tile collapsed to
+    // 0 height and the styled text invisible.
     <div
       aria-hidden
-      className={`relative aspect-[9/16] rounded bg-gradient-to-br from-[#1c1f26] via-[#0e1014] to-[#1a1d24] overflow-hidden ${className}`}
-      style={{ containerType: "size" }}
+      className={`relative rounded bg-gradient-to-br from-[#1c1f26] via-[#0e1014] to-[#1a1d24] overflow-hidden ${className}`}
+      style={{
+        containerType: "size",
+        aspectRatio: "9 / 16",
+        width: "100%",
+      }}
     >
       <span
         className="absolute inset-0 opacity-30"
