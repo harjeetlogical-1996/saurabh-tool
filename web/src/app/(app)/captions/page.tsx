@@ -620,6 +620,76 @@ const DEFAULT_OPTS: RenderOpts = {
 
 type EditorTab = "style" | "layout" | "customize" | "text";
 
+/** Backend named-colour palette mirrored here so the Customize tab can
+ *  show the real preset colours in the swatch picker — without this the
+ *  pickers default to empty/black even when the preset says "yellow". */
+const NAMED_COLOR_HEX: Record<string, string> = {
+  white: "#FFFFFF",
+  black: "#000000",
+  yellow: "#FFE04A",
+  cyan: "#00F0FF",
+  navy: "#0B2A4A",
+  magenta: "#FF3D9C",
+  red: "#FF3D3D",
+  darkred: "#B30000",
+  orange: "#FF8A2B",
+  amber: "#FFC107",
+  green: "#32D74B",
+  lime: "#B6FF3C",
+  blue: "#3B82F6",
+  purple: "#A855F7",
+  pink: "#FF6FCB",
+  hotpink: "#FF1493",
+  gold: "#F5C518",
+  silver: "#C0C0C0",
+  cream: "#FFF1D0",
+  paper: "#F4ECD8",
+  gray: "#8E8E93",
+  darkgray: "#333333",
+};
+
+/** A subset of every backend STYLE_PRESETS field the Customize tab
+ *  needs to render the "default" state when an override is null. Kept
+ *  in sync by hand with api/tools/captions.py — values are the same
+ *  semantics: outlineWidth is % of font size, bgAlpha 0=opaque etc. */
+const STYLE_PRESET_DEFAULTS: Record<string, {
+  primaryColor: string;
+  outlineColor: string;
+  outlineWidth: number;
+  bgColor: string;
+  bgAlpha: number;
+  fontSizeRatio: number;
+  shadow: number;
+  fontFamily: string;
+}> = {
+  plain:      { primaryColor: "white",  outlineColor: "black",   outlineWidth: 9,  bgColor: "black",   bgAlpha: 80,  fontSizeRatio: 0.045, shadow: 0, fontFamily: "Inter" },
+  highlight:  { primaryColor: "white",  outlineColor: "black",   outlineWidth: 5,  bgColor: "cyan",    bgAlpha: 0,   fontSizeRatio: 0.045, shadow: 0, fontFamily: "Inter" },
+  karaoke:    { primaryColor: "yellow", outlineColor: "black",   outlineWidth: 7,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 0, fontFamily: "Inter" },
+  outline:    { primaryColor: "cyan",   outlineColor: "black",   outlineWidth: 13, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 0, fontFamily: "Inter" },
+  neon:       { primaryColor: "white",  outlineColor: "cyan",    outlineWidth: 16, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 7, fontFamily: "Inter" },
+  gradient:   { primaryColor: "cyan",   outlineColor: "navy",    outlineWidth: 11, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.052, shadow: 0, fontFamily: "Inter" },
+  typewriter: { primaryColor: "white",  outlineColor: "black",   outlineWidth: 5,  bgColor: "black",   bgAlpha: 0,   fontSizeRatio: 0.04,  shadow: 0, fontFamily: "Courier New" },
+  news:       { primaryColor: "white",  outlineColor: "darkred", outlineWidth: 10, bgColor: "darkred", bgAlpha: 0,   fontSizeRatio: 0.044, shadow: 0, fontFamily: "Inter" },
+  cinema:     { primaryColor: "white",  outlineColor: "black",   outlineWidth: 9,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.038, shadow: 0, fontFamily: "Inter" },
+  mrbeast:    { primaryColor: "yellow", outlineColor: "black",   outlineWidth: 12, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.058, shadow: 4, fontFamily: "Anton" },
+  reels:      { primaryColor: "lime",   outlineColor: "black",   outlineWidth: 10, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.055, shadow: 0, fontFamily: "Anton" },
+  tiktok:     { primaryColor: "white",  outlineColor: "hotpink", outlineWidth: 10, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.053, shadow: 3, fontFamily: "Anton" },
+  whisper:    { primaryColor: "silver", outlineColor: "black",   outlineWidth: 6,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.036, shadow: 0, fontFamily: "Inter" },
+  underline:  { primaryColor: "white",  outlineColor: "cyan",    outlineWidth: 12, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.046, shadow: 0, fontFamily: "Inter" },
+  sticker:    { primaryColor: "cream",  outlineColor: "white",   outlineWidth: 9,  bgColor: "black",   bgAlpha: 0,   fontSizeRatio: 0.046, shadow: 0, fontFamily: "Inter" },
+  comic:      { primaryColor: "yellow", outlineColor: "black",   outlineWidth: 11, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.054, shadow: 3, fontFamily: "Bangers" },
+  retro:      { primaryColor: "amber",  outlineColor: "darkred", outlineWidth: 9,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 5, fontFamily: "Anton" },
+};
+
+/** Resolve a colour value — either an explicit hex from a customize
+ *  override, or the named hex from the preset palette. Used by colour
+ *  pickers to show the right swatch when no override is set. */
+function resolveColor(value: string | null | undefined, fallbackName: string): string {
+  if (value && value.startsWith("#")) return value;
+  if (value && NAMED_COLOR_HEX[value]) return NAMED_COLOR_HEX[value];
+  return NAMED_COLOR_HEX[fallbackName] ?? "#FFFFFF";
+}
+
 /** Available font choices in Customize tab. These must match families
  *  available to libass on the backend (assets/fonts dir + system). */
 const FONT_OPTIONS: Array<{ v: string; label: string }> = [
@@ -1169,16 +1239,40 @@ function Editor({
             </div>
           )}
 
-          {tab === "customize" && (
+          {tab === "customize" && (() => {
+            // Pull the active style's defaults so the Customize tab
+            // displays the right colours / sliders before the user has
+            // touched anything. Any explicit override (non-null in opts)
+            // still wins over the preset; the preset only fills in the
+            // "no override yet" state so the picker doesn't look empty.
+            const preset =
+              STYLE_PRESET_DEFAULTS[opts.style] ?? STYLE_PRESET_DEFAULTS.plain;
+            const defaultPrimaryHex = resolveColor(null, preset.primaryColor);
+            const defaultOutlineHex = resolveColor(null, preset.outlineColor);
+            const defaultBgHex = resolveColor(null, preset.bgColor);
+            // Default font size in px = ratio × current video height
+            // (falls back to 1080 if the parent job hasn't reported
+            // dimensions yet). FONT_SCALE 0.95 matches the backend.
+            const videoH = job.videoHeight || 1080;
+            const defaultFontSize = Math.round(
+              videoH * preset.fontSizeRatio * 0.95,
+            );
+            const defaultBgOpacityPct = Math.round(
+              ((255 - preset.bgAlpha) / 255) * 100,
+            );
+
+            return (
             <div className="space-y-5">
               <p className="text-[11.5px] text-[var(--muted)] leading-[1.55]">
-                Tweak the picked style. Leave a field at default to use the
-                style preset. Live preview updates on the video as you tune.
+                Tweak the picked style. Each field starts at the{" "}
+                <strong className="text-white">{opts.style}</strong> preset
+                default — hit reset to revert any change.
               </p>
 
               <ColorRow
                 label="Text color"
                 value={opts.primaryColor}
+                defaultHex={defaultPrimaryHex}
                 onChange={(v) =>
                   setOpts((o) => ({ ...o, primaryColor: v }))
                 }
@@ -1186,17 +1280,21 @@ function Editor({
               <ColorRow
                 label="Outline color"
                 value={opts.outlineColor}
+                defaultHex={defaultOutlineHex}
                 onChange={(v) =>
                   setOpts((o) => ({ ...o, outlineColor: v }))
                 }
               />
               <SliderRow
                 label="Outline thickness"
-                value={opts.outlineWidth ?? 0}
+                // outline_width in presets is % of font size; slider
+                // shows the raw % so the user can dial in a "12% of
+                // font" stroke regardless of resolution.
+                value={opts.outlineWidth ?? preset.outlineWidth}
                 min={0}
-                max={12}
+                max={40}
                 step={1}
-                unit="px"
+                unit="%"
                 isOverridden={opts.outlineWidth !== null}
                 onChange={(v) =>
                   setOpts((o) => ({ ...o, outlineWidth: v }))
@@ -1209,13 +1307,14 @@ function Editor({
               <ColorRow
                 label="Background color"
                 value={opts.bgColor}
+                defaultHex={defaultBgHex}
                 onChange={(v) => setOpts((o) => ({ ...o, bgColor: v }))}
               />
               <SliderRow
                 label="Background opacity"
                 value={
                   opts.bgAlpha === null
-                    ? 0
+                    ? defaultBgOpacityPct
                     : Math.round(((255 - opts.bgAlpha) / 255) * 100)
                 }
                 min={0}
@@ -1236,7 +1335,7 @@ function Editor({
 
               <SliderRow
                 label="Font size"
-                value={opts.fontSize ?? 48}
+                value={opts.fontSize ?? defaultFontSize}
                 min={16}
                 max={140}
                 step={2}
@@ -1314,7 +1413,8 @@ function Editor({
                 Reset all to preset
               </button>
             </div>
-          )}
+            );
+          })()}
 
           {tab === "text" && (
             <div className="max-w-[420px] space-y-4">
@@ -2650,12 +2750,20 @@ function FailedCard({ job }: { job: Job }) {
 function ColorRow({
   label,
   value,
+  defaultHex,
   onChange,
 }: {
   label: string;
   value: string | null;
+  /** Preset's color when the user hasn't overridden — resolved hex.
+   *  Used to highlight the right swatch as the "default" state so the
+   *  picker doesn't look empty just because no override is set yet. */
+  defaultHex?: string;
   onChange: (v: string | null) => void;
 }) {
+  // What the swatches compare against: the user's override, or the
+  // preset default if nothing has been changed yet.
+  const effective = (value ?? defaultHex ?? "").toLowerCase();
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
@@ -2674,7 +2782,7 @@ function ColorRow({
       </div>
       <div className="flex flex-wrap gap-1.5">
         {COLOR_SWATCHES.map((c) => {
-          const active = (value ?? "").toLowerCase() === c.toLowerCase();
+          const active = effective === c.toLowerCase();
           return (
             <button
               key={c}
