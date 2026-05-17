@@ -44,32 +44,51 @@ _TRANSCRIBE_LOCK = threading.Lock()
 # Set while a transcribe is actively running, so other workers can show
 # a "Waiting in queue" message instead of pretending to be transcribing.
 TRANSCRIBE_BUSY = threading.Event()
-_MODEL = None  # lazy-loaded singleton
+
+# Cache of loaded WhisperModel instances keyed by model size. Cold-start
+# pays the model-load cost once per size; subsequent transcribes reuse
+# the loaded instance. Two models max — "base" for fast/English/Auto
+# paths and "small" for Hindi/Urdu (needs Devanagari support).
+_MODELS: dict[str, "WhisperModel"] = {}  # type: ignore[name-defined]
 
 
-def _get_model():
-    """Load and cache the model once per process. First call pays the
-    cold-start cost (download if missing + load into RAM); every call
-    after is instant."""
-    global _MODEL
-    if _MODEL is not None:
-        return _MODEL
+# Language → model picker. Hindi and Urdu need the bigger "small" model
+# (base outputs the wrong script for Devanagari/Nastaliq text). English,
+# auto-detect, and everything else stays on "base" — 3x faster and
+# accurate enough for Latin-script audio.
+_HEAVY_LANGUAGES = {"hi", "ur", "bn", "ta", "te", "mr", "gu", "kn", "pa", "ml"}
+
+
+def _pick_model_size(language: Optional[str]) -> str:
+    """Smart routing: heavy-script langs get 'small', everyone else
+    gets 'base'. Env var override (WHISPER_MODEL) wins for testing."""
+    forced = os.environ.get("WHISPER_MODEL")
+    if forced:
+        return forced
+    if language and language.lower() in _HEAVY_LANGUAGES:
+        return "small"
+    return "base"
+
+
+def _get_model(language: Optional[str] = None):
+    """Load and cache the right-sized model for this language. First
+    call for each size pays the cold-start cost (download if missing
+    + load into RAM); subsequent calls return the cached instance."""
+    size = _pick_model_size(language)
+    cached = _MODELS.get(size)
+    if cached is not None:
+        return cached
     with _MODEL_LOCK:
-        if _MODEL is not None:
-            return _MODEL
+        cached = _MODELS.get(size)
+        if cached is not None:
+            return cached
         from faster_whisper import WhisperModel
-        # small: ~3x faster than medium, ~50% slower than base. Hindi
-        # mostly stays in Devanagari (medium is cleaner but ~1 min audio
-        # takes ~3 min to decode on CPU). small = ~1 min audio → ~1 min
-        # decode on a 4-core laptop CPU, which is the speed sweet spot
-        # for self-hosted captions.
-        model_size = os.environ.get("WHISPER_MODEL", "small")
         # int8 quantisation: same accuracy on CPU, half the RAM + faster.
         compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
         device = os.environ.get("WHISPER_DEVICE", "cpu")
-        print(f"[whisper_local] loading model={model_size} device={device} compute={compute_type}")
-        _MODEL = WhisperModel(
-            model_size,
+        print(f"[whisper_local] loading model={size} device={device} compute={compute_type}")
+        _MODELS[size] = WhisperModel(
+            size,
             device=device,
             compute_type=compute_type,
             # Cache in a stable folder so the model survives container
@@ -78,8 +97,8 @@ def _get_model():
                 if os.name != "nt"
                 else os.environ.get("WHISPER_CACHE_DIR"),
         )
-        print(f"[whisper_local] model loaded")
-        return _MODEL
+        print(f"[whisper_local] model loaded: {size}")
+        return _MODELS[size]
 
 
 def transcribe_words_local(
@@ -101,13 +120,15 @@ def transcribe_words_local(
     (" hello"). We strip that here so downstream punctuation cleanup
     in captions.py gets clean tokens.
     """
-    model = _get_model()
     # Language hint: passed-in param > env var > auto-detect. Hindi and
     # Urdu are phonetically close, so on short clips Whisper's auto can
     # flip. Setting language="hi" locks it. "auto"/None lets it choose.
     lang = language if (language and language != "auto") else (
         os.environ.get("WHISPER_LANGUAGE") or None
     )
+    # Pick the right-sized model for this language. English/auto use the
+    # fast 'base' model; Hindi/Urdu/other Indic scripts use 'small'.
+    model = _get_model(lang)
     # The transcribe call + the segments-generator drain must BOTH be
     # inside the lock — the generator references model state that gets
     # rewritten by the next call. Releasing after .transcribe() but

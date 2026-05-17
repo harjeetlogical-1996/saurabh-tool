@@ -34,14 +34,17 @@ RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt \
  && pip install --no-cache-dir razorpay==1.4.2
 
-# Pre-bake the faster-whisper "small" model into the image. Cloud Run
-# scales-to-zero by default, so without this every cold start would
-# re-download ~460MB before the first transcribe finished — a 30s+
-# delay the user would see as a frozen progress bar. Baking it in
-# trades image size (+460MB) for first-request latency. Override via
-# WHISPER_MODEL env var at deploy time if needed.
+# Pre-bake BOTH faster-whisper models into the image so cold starts
+# never block on a download.
+#   - "base"  (~140MB): English / auto-detect / Latin-script audio. ~3x
+#     faster than 'small', what most users actually want.
+#   - "small" (~460MB): Hindi / Urdu / other Indic scripts where 'base'
+#     would output the wrong script (Urdu instead of Devanagari, etc.)
+# tools/whisper_local.py picks between them based on the user's
+# Language picker selection. Image size +600MB total; cold start is
+# instant for either path.
 ENV WHISPER_CACHE_DIR=/opt/whisper-models
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8', download_root='/opt/whisper-models')"
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8', download_root='/opt/whisper-models'); WhisperModel('small', device='cpu', compute_type='int8', download_root='/opt/whisper-models')"
 
 COPY . .
 
