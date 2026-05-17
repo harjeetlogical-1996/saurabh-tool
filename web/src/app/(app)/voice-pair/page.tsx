@@ -18,7 +18,12 @@ import {
   useMemo,
   useState,
 } from "react";
-import { ApiError, apiClient, type Job } from "@/lib/api";
+import {
+  ApiError,
+  apiClient,
+  type CaptionRenderOpts,
+  type Job,
+} from "@/lib/api";
 
 type Animation = "static" | "ken_burns";
 type Mode = "single" | "slideshow";
@@ -92,16 +97,193 @@ export default function VoicePairPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   /** Project name the user types for THIS submit. Cleared on success. */
   const [projectName, setProjectName] = useState("");
+  /** Language hint for the auto-chained captions transcribe spawned
+   *  after each render. "auto" lets Whisper detect; hi/ur/etc. force
+   *  the medium model that handles Devanagari/Nastaliq scripts. */
+  const [language, setLanguage] = useState<"auto" | "hi" | "en" | "ur">(
+    "auto",
+  );
 
-  /** Refresh the recent jobs list so users see progress on this tool. */
+  // Auto-chained bulk-captions transcribe jobs spawned by completed
+  // voice-pair renders. Keyed by the parent voice-pair job id (via
+  // `fromVoicePairJobId`). Drives the combined progress bar and the
+  // "Open captions editor" CTA on each voice-pair card.
+  const [chainedCaptions, setChainedCaptions] = useState<Map<string, Job>>(
+    new Map(),
+  );
+  // Latest finished `bulk-captions-render` job per transcribe job id.
+  // Lets the Preview button on a voice-pair card play the BURNED video
+  // (captions baked in) once the user has rendered captions, instead
+  // of the bare voice-pair output mp4.
+  const [latestCaptionRender, setLatestCaptionRender] = useState<
+    Map<string, Job>
+  >(new Map());
+  // In-flight `bulk-captions-render` job per transcribe job id (status
+  // queued or running). Lets each voice-pair card show its OWN caption-
+  // render progress bar while the burn is in progress — including the
+  // jobs spawned by the project-level "Apply style to all" bulk button.
+  const [activeCaptionRender, setActiveCaptionRender] = useState<
+    Map<string, Job>
+  >(new Map());
+  // Captions editor modal — wraps the /captions page in an iframe so
+  // the user never leaves voice-pair. Holds the transcribe job id of
+  // whichever video the user clicked "Open captions editor" on; null
+  // means the modal is closed.
+  const [editorJobId, setEditorJobId] = useState<string | null>(null);
+  // Bulk "apply same style to all" — state shared across all project
+  // cards so only one bulk job runs at a time and per-project notices
+  // surface cleanly. Keyed by projectId so the right card shows status.
+  const [bulkBusyProjectId, setBulkBusyProjectId] = useState<string | null>(
+    null,
+  );
+  const [bulkNoticeByProject, setBulkNoticeByProject] = useState<
+    Record<string, string>
+  >({});
+
+  /** Read the rendered style off a captions render job's params. Each
+   *  bulk-captions-render job stamps the resolved `options` dict on
+   *  its params at submit time — that's exactly the CaptionRenderOpts
+   *  shape we need to replay against other transcribes. */
+  function extractRenderOpts(render: Job): CaptionRenderOpts | null {
+    const params = (render.params || {}) as Record<string, unknown>;
+    const o = params.options as Record<string, unknown> | undefined;
+    if (!o || typeof o.style !== "string") return null;
+    const payload: CaptionRenderOpts = {
+      style: o.style,
+      position:
+        (o.position as "top" | "middle" | "bottom") ?? "bottom",
+      wordsPerLine:
+        typeof o.wordsPerLine === "number" ? o.wordsPerLine : 3,
+      uppercase: !!o.uppercase,
+    };
+    if (typeof o.posXFrac === "number") payload.posXFrac = o.posXFrac;
+    if (typeof o.posYFrac === "number") payload.posYFrac = o.posYFrac;
+    if (typeof o.primaryColor === "string")
+      payload.primaryColor = o.primaryColor;
+    if (typeof o.outlineColor === "string")
+      payload.outlineColor = o.outlineColor;
+    if (typeof o.outlineWidth === "number")
+      payload.outlineWidth = o.outlineWidth;
+    if (typeof o.bgColor === "string") payload.bgColor = o.bgColor;
+    if (typeof o.bgAlpha === "number") payload.bgAlpha = o.bgAlpha;
+    if (typeof o.fontSize === "number") payload.fontSize = o.fontSize;
+    if (typeof o.fontFamily === "string")
+      payload.fontFamily = o.fontFamily;
+    if (typeof o.shadow === "number") payload.shadow = o.shadow;
+    return payload;
+  }
+
+  /** Refresh the recent jobs list so users see progress on this tool.
+   *  Also pulls the auto-chained captions transcribe jobs so each
+   *  voice-pair card can show "transcribing captions…" progress and
+   *  flip to "Open captions editor" once transcribe is done. */
   const refresh = useCallback(async () => {
     try {
-      const res = await apiClient.listJobs({ limit: 30 });
+      const res = await apiClient.listJobs({ limit: 100 });
       setJobs(res.items.filter((j) => j.tool === "voice-pair"));
+      // Index captions transcribe jobs by their voice-pair parent so
+      // each card can find its own without scanning the whole list.
+      const m = new Map<string, Job>();
+      for (const j of res.items) {
+        if (j.tool === "bulk-captions" && j.fromVoicePairJobId) {
+          m.set(j.fromVoicePairJobId, j);
+        }
+      }
+      setChainedCaptions(m);
+      // Index the latest done `bulk-captions-render` per transcribe
+      // job id. The list comes newest-first from the backend, so the
+      // first match per parent is the latest one — we skip subsequent
+      // duplicates with the `has` check.
+      const rm = new Map<string, Job>();
+      // Parallel index for in-flight (queued/running) renders so each
+      // card can show its own progress bar without scanning the list.
+      const am = new Map<string, Job>();
+      for (const j of res.items) {
+        if (j.tool !== "bulk-captions-render") continue;
+        const params = (j.params || {}) as Record<string, unknown>;
+        const parentId = params.parentJobId;
+        if (typeof parentId !== "string") continue;
+        if (j.status === "done") {
+          if (!rm.has(parentId)) rm.set(parentId, j);
+        } else if (j.status === "queued" || j.status === "running") {
+          if (!am.has(parentId)) am.set(parentId, j);
+        }
+      }
+      setLatestCaptionRender(rm);
+      setActiveCaptionRender(am);
     } catch {
       // non-fatal; the page is still usable for uploads.
     }
   }, []);
+
+  /** Apply the style of an already-captioned video to every other
+   *  transcribed sibling in the same project. Mirrors the captions
+   *  page's "Apply to N other videos" pattern — read the resolved
+   *  options off the source render, replay them against the target
+   *  transcribe job ids via the bulk-render endpoint. */
+  const runApplyStyleToProject = useCallback(
+    async (
+      projectKey: string,
+      sourceRender: Job,
+      targetTranscribeIds: string[],
+    ) => {
+      if (targetTranscribeIds.length === 0) return;
+      const payload = extractRenderOpts(sourceRender);
+      if (!payload) {
+        setBulkNoticeByProject((m) => ({
+          ...m,
+          [projectKey]: "Could not read style off the source render.",
+        }));
+        return;
+      }
+      setBulkBusyProjectId(projectKey);
+      setBulkNoticeByProject((m) => {
+        const next = { ...m };
+        delete next[projectKey];
+        return next;
+      });
+      try {
+        const res = await apiClient.submitCaptionsRenderBulk(
+          targetTranscribeIds,
+          payload,
+        );
+        const parts = [`${res.summary.queued} queued`];
+        if (res.summary.rejected > 0)
+          parts.push(`${res.summary.rejected} rejected`);
+        setBulkNoticeByProject((m) => ({
+          ...m,
+          [projectKey]: parts.join(" · "),
+        }));
+        await refresh();
+      } catch (e) {
+        setBulkNoticeByProject((m) => ({
+          ...m,
+          [projectKey]:
+            e instanceof ApiError ? e.message : "Bulk apply failed.",
+        }));
+      } finally {
+        setBulkBusyProjectId(null);
+      }
+    },
+    [refresh],
+  );
+
+  // Listen for "editor-closed" postMessage from the embedded captions
+  // iframe so we can dismiss the modal when the user hits the close
+  // button inside the editor. Same-origin check is implicit (iframe
+  // lives at the same /captions route), so we just match on the type.
+  useEffect(() => {
+    function onMsg(e: MessageEvent) {
+      if (e.data && e.data.type === "captions-editor-closed") {
+        setEditorJobId(null);
+        // Pick up any renders the editor kicked off while open so the
+        // voice-pair card flips to its final state without a manual reload.
+        refresh();
+      }
+    }
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, [refresh]);
 
   useEffect(() => {
     refresh();
@@ -273,6 +455,7 @@ export default function VoicePairPage() {
       const res = await apiClient.submitVoicePair(pairs, {
         mode: "single",
         projectName: projectName.trim() || undefined,
+        language: language === "auto" ? undefined : language,
       });
       const parts = [`${res.summary.queued} queued in “${res.projectName}”`];
       if (res.summary.rejected) parts.push(`${res.summary.rejected} rejected`);
@@ -502,6 +685,20 @@ export default function VoicePairPage() {
             maxLength={80}
             className="flex-1 bg-black/30 border border-[var(--line)] rounded px-3 py-2 text-[13px] placeholder:text-[var(--muted)]/60 focus:outline-none focus:border-[var(--accent)]"
           />
+          {/* Caption language picker. Routes Hindi/Urdu audio to the
+              medium whisper model after the voice-pair render finishes;
+              defaults to Whisper auto-detect for everything else. */}
+          <select
+            value={language}
+            onChange={(e) => setLanguage(e.target.value as typeof language)}
+            className="bg-black/30 border border-[var(--line)] rounded px-3 py-2 text-[13px] focus:outline-none focus:border-[var(--accent)]"
+            title="Language for the auto-generated captions. Pick Hindi/Urdu for Devanagari/Nastaliq audio."
+          >
+            <option value="auto">Captions: Auto-detect</option>
+            <option value="hi">Hindi</option>
+            <option value="en">English</option>
+            <option value="ur">Urdu</option>
+          </select>
           <div className="flex items-center gap-3 justify-between sm:justify-end">
             <div className="text-[12px] font-mono text-[var(--muted)]">
               {pairCount > 0
@@ -565,16 +762,52 @@ export default function VoicePairPage() {
           <p className="text-[12px] text-[var(--muted)]">Nothing yet.</p>
         ) : (
           <ul className="space-y-3">
-            {groupJobsByProject(jobs).map((proj) => (
-              <ProjectCard
-                key={proj.projectId ?? "unfiled"}
-                project={proj}
-                onChanged={refresh}
-              />
-            ))}
+            {groupJobsByProject(jobs).map((proj) => {
+              const projectKey = proj.projectId ?? "unfiled";
+              return (
+                <ProjectCard
+                  key={projectKey}
+                  project={proj}
+                  onChanged={refresh}
+                  chainedCaptions={chainedCaptions}
+                  latestCaptionRender={latestCaptionRender}
+                  activeCaptionRender={activeCaptionRender}
+                  onOpenEditor={setEditorJobId}
+                  onApplyStyleToAll={(src, targets) =>
+                    runApplyStyleToProject(projectKey, src, targets)
+                  }
+                  bulkBusy={bulkBusyProjectId === projectKey}
+                  bulkNotice={bulkNoticeByProject[projectKey] ?? null}
+                />
+              );
+            })}
           </ul>
         )}
       </section>
+
+      {/* Inline captions editor — full-screen overlay containing the
+          /captions page in embed mode. Same-origin iframe so the
+          editor inherits the user's session cookie automatically. The
+          embed flag tells the captions page to hide its library chrome
+          (no point showing the user OTHER videos here) and to
+          postMessage back when the editor closes. */}
+      {editorJobId && (
+        <div className="fixed inset-0 z-[60] bg-[var(--bg)]">
+          <button
+            type="button"
+            onClick={() => setEditorJobId(null)}
+            className="absolute top-3 right-3 z-[61] inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-white text-[18px] leading-none hover:bg-black/80"
+            aria-label="Close captions editor"
+          >
+            ×
+          </button>
+          <iframe
+            src={`/captions?open=${editorJobId}&embed=1`}
+            className="w-full h-full border-0"
+            title="Captions editor"
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -609,9 +842,31 @@ function groupJobsByProject(jobs: Job[]): {
 function ProjectCard({
   project,
   onChanged,
+  chainedCaptions,
+  latestCaptionRender,
+  activeCaptionRender,
+  onOpenEditor,
+  onApplyStyleToAll,
+  bulkBusy,
+  bulkNotice,
 }: {
   project: { projectId: string | null; projectName: string; jobs: Job[] };
   onChanged: () => void;
+  chainedCaptions: Map<string, Job>;
+  /** Latest finished `bulk-captions-render` keyed by transcribe job id.
+   *  Used to swap a voice-pair card's Preview/Download to the burned
+   *  video once the user has rendered captions. */
+  latestCaptionRender: Map<string, Job>;
+  /** In-flight (queued/running) `bulk-captions-render` per transcribe
+   *  job id. Drives the per-card progress bar that shows up after a
+   *  bulk apply or a single re-render is queued. */
+  activeCaptionRender: Map<string, Job>;
+  onOpenEditor: (captionsJobId: string) => void;
+  /** Bulk handler: takes the source captioned render and the list of
+   *  target transcribe job ids that should get the same style. */
+  onApplyStyleToAll: (sourceRender: Job, targetTranscribeIds: string[]) => void;
+  bulkBusy: boolean;
+  bulkNotice: string | null;
 }) {
   const [expanded, setExpanded] = useState(true);
   const [renaming, setRenaming] = useState(false);
@@ -711,8 +966,48 @@ function ProjectCard({
             {doneCount > 0 && ` · ${doneCount} done`}
             {runningCount > 0 && ` · ${runningCount} running`}
             {failedCount > 0 && ` · ${failedCount} failed`}
+            {bulkNotice && (
+              <span className="ml-2 text-[var(--accent)]">· {bulkNotice}</span>
+            )}
           </div>
         </div>
+        {/* "Apply style of 1st captioned video to N other videos" —
+            same bulk shortcut the captions page has. Only renders
+            when (a) at least one sibling has a captioned render to
+            copy the style FROM, and (b) there's at least one other
+            transcribe in the project to copy it TO. */}
+        {(() => {
+          // Find the first sibling that has both a chained transcribe
+          // AND a finished captions render — that's the style source.
+          let sourceRender: Job | null = null;
+          const targetTranscribeIds: string[] = [];
+          for (const j of project.jobs) {
+            const cap = chainedCaptions.get(j.id);
+            if (!cap || cap.status !== "done") continue;
+            const r = latestCaptionRender.get(cap.id);
+            if (!sourceRender && r) {
+              sourceRender = r;
+              continue;
+            }
+            // Every other done transcribe becomes a target — backend
+            // re-renders harmlessly even if it already has a render.
+            targetTranscribeIds.push(cap.id);
+          }
+          if (!sourceRender || targetTranscribeIds.length === 0) return null;
+          const src = sourceRender;
+          return (
+            <button
+              type="button"
+              onClick={() => onApplyStyleToAll(src, targetTranscribeIds)}
+              disabled={bulkBusy}
+              className="text-[11px] font-mono uppercase tracking-[0.18em] px-3 py-1.5 rounded-full border border-[var(--accent)] text-[var(--accent)] hover:bg-[var(--accent)] hover:text-black disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {bulkBusy
+                ? "Applying…"
+                : `Apply style to ${targetTranscribeIds.length} other${targetTranscribeIds.length === 1 ? "" : "s"}`}
+            </button>
+          );
+        })()}
         {zipUrl && (
           <a
             href={zipUrl}
@@ -737,7 +1032,25 @@ function ProjectCard({
         <ul className="divide-y divide-[var(--line)]">
           {project.jobs.map((j) => (
             <li key={j.id} className="px-2 py-2">
-              <VoicePairJobRow job={j} onChanged={onChanged} />
+              {(() => {
+                const capJob = chainedCaptions.get(j.id) ?? null;
+                const capRender = capJob
+                  ? latestCaptionRender.get(capJob.id) ?? null
+                  : null;
+                const activeRender = capJob
+                  ? activeCaptionRender.get(capJob.id) ?? null
+                  : null;
+                return (
+                  <VoicePairJobRow
+                    job={j}
+                    onChanged={onChanged}
+                    captionsJob={capJob}
+                    captionRender={capRender}
+                    activeCaptionRender={activeRender}
+                    onOpenEditor={onOpenEditor}
+                  />
+                );
+              })()}
             </li>
           ))}
         </ul>
@@ -970,14 +1283,34 @@ function MediaGroupRow({
 function VoicePairJobRow({
   job,
   onChanged,
+  captionsJob,
+  captionRender,
+  activeCaptionRender,
+  onOpenEditor,
 }: {
   job: Job;
   onChanged: () => void;
+  /** Auto-chained bulk-captions transcribe job spawned by the worker
+   *  after this voice-pair render finished. Null until the chain fires. */
+  captionsJob: Job | null;
+  /** Latest finished `bulk-captions-render` for this captionsJob. When
+   *  present, Preview/Download switch to the burned-in video so the
+   *  user sees captions baked onto the voice-pair render instead of
+   *  the bare mp4. */
+  captionRender: Job | null;
+  /** In-flight (queued/running) `bulk-captions-render` for this row's
+   *  transcribe. When present we surface a progress bar + "Burning
+   *  captions… X%" label so the user sees bulk-apply jobs make
+   *  progress per video, not just in the project header notice. */
+  activeCaptionRender: Job | null;
+  /** Click handler for the "Open captions editor" button. Receives the
+   *  chained transcribe job's id; the parent page opens the editor in
+   *  an iframe modal so the user never leaves voice-pair. */
+  onOpenEditor: (captionsJobId: string) => void;
 }) {
   const [busy, setBusy] = useState<"cancel" | "remove" | null>(null);
   const [showPreview, setShowPreview] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
-  const status = job.status;
   const params = (job.params || {}) as Record<string, unknown>;
   // Slideshow jobs carry mediaFilenames[] instead of mediaFilename.
   const mediaName = String(
@@ -987,15 +1320,74 @@ function VoicePairJobRow({
         : "?"),
   );
   const voiceName = String(params.voiceFilename ?? "?");
-  const pct = typeof job.progress === "number" ? job.progress : 0;
-  const isDone = status === "done";
-  const isFailed = status === "failed";
-  const isCancelled = status === "cancelled";
-  const isRunning = status === "running" || status === "queued";
+  const vpRenderPct = typeof job.progress === "number" ? job.progress : 0;
+  const vpRenderDone = job.status === "done";
+  const capPct =
+    captionsJob && typeof captionsJob.progress === "number"
+      ? captionsJob.progress
+      : 0;
+  const capDone = !!captionsJob && captionsJob.status === "done";
+  const capFailed =
+    !!captionsJob &&
+    (captionsJob.status === "failed" || captionsJob.status === "cancelled");
+  // Burn-in (captions-render) state — kicks in either after the user
+  // hits Render in the editor or after the project-level "Apply style
+  // to all" bulk button.
+  const renderPct =
+    activeCaptionRender && typeof activeCaptionRender.progress === "number"
+      ? activeCaptionRender.progress
+      : 0;
+  const renderActive = !!activeCaptionRender;
+  // Progress logic by phase:
+  //   1. Voice-pair render running         → 0–50% (vpRenderPct/2)
+  //   2. Transcribe running                → 50–100% (50 + capPct/2)
+  //   3. Transcribe done, no burn yet      → 100% (waiting for user)
+  //   4. Burn (caption render) running     → 0–100% from renderPct
+  //      so the bar feels "fresh" for this new step
+  const pct = renderActive
+    ? renderPct
+    : vpRenderDone
+      ? capDone
+        ? 100
+        : 50 + Math.round(capPct / 2)
+      : Math.round(vpRenderPct / 2);
+  const status_label = (() => {
+    if (job.status === "failed") return "Render failed";
+    if (job.status === "cancelled") return "Cancelled";
+    if (!vpRenderDone) return job.message || job.status;
+    // Voice-pair render is done. Caption-render takes precedence over
+    // the transcribe message because it's the most recent thing the
+    // user kicked off.
+    if (renderActive) {
+      const m = activeCaptionRender?.message;
+      return m && m.trim() ? m : `Burning captions… ${renderPct}%`;
+    }
+    if (capFailed) return "Captioning failed — open captions to retry";
+    if (capDone) return "Ready · open captions editor";
+    if (!captionsJob) return "Queueing captions…";
+    return captionsJob.message || `Transcribing captions… ${capPct}%`;
+  })();
+  // "Done" from the user's POV means the WHOLE chain is done — that's
+  // when the green tick + 100% + editor button appear together.
+  const isDone = vpRenderDone && capDone;
+  const isFailed = job.status === "failed";
+  const isCancelled = job.status === "cancelled";
+  const isRunning =
+    job.status === "running" ||
+    job.status === "queued" ||
+    (vpRenderDone && !capDone && !capFailed) ||
+    renderActive;
 
-  const outputUrl = isDone
-    ? apiClient.jobOutputUrl(job.id, {
-        cacheKey: job.updatedAt ?? job.id,
+  // Preview / Download are gated on the CAPTIONED render existing.
+  // The raw voice-pair mp4 is a partial state from the user's POV —
+  // showing it while captions are still transcribing/rendering led
+  // people to think the captions step had failed (they pressed
+  // Preview, saw the video without captions, and assumed something
+  // broke). Hide the buttons until the chain produces a burned video.
+  const outputUrl = captionRender
+    ? apiClient.jobOutputUrl(captionRender.id, {
+        variant: "active",
+        cacheKey: captionRender.updatedAt ?? captionRender.id,
       })
     : null;
 
@@ -1040,15 +1432,16 @@ function VoicePairJobRow({
             <span>{voiceName}</span>
           </div>
           <div className="text-[11px] font-mono text-[var(--muted)] mt-1">
-            {status} · {job.message ?? ""}
+            {status_label}
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
         {isRunning && (
           <div className="text-[11px] font-mono text-[var(--accent)]">{pct}%</div>
         )}
-        {/* Done → inline preview toggle. Click expands a video player
-            below the row so the user doesn't have to download. */}
+        {/* Inline preview toggle — only shown once the CAPTIONED render
+            exists (outputUrl only resolves then). Plays the burned mp4
+            so the user sees captions baked onto the voice-pair video. */}
         {outputUrl && (
           <button
             type="button"
@@ -1066,6 +1459,21 @@ function VoicePairJobRow({
           >
             Download
           </a>
+        )}
+        {/* Auto-chain pointer: when the voice-pair worker finishes a
+            render it queues a captions-transcribe on the rendered mp4.
+            Only show this CTA once the transcribe is ALSO done — the
+            editor is useless without a transcript. Click opens the
+            captions editor inside an iframe modal so the user stays
+            on the voice-pair page. */}
+        {capDone && captionsJob && (
+          <button
+            type="button"
+            onClick={() => onOpenEditor(captionsJob.id)}
+            className="text-[11px] font-mono uppercase tracking-[0.18em] px-3 py-1.5 rounded-full bg-[var(--accent)] text-black hover:bg-[var(--accent-deep)]"
+          >
+            Open captions editor →
+          </button>
         )}
         {isFailed && (
           <span className="text-[11px] font-mono text-red-400">Failed</span>

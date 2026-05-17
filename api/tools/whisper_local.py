@@ -48,25 +48,25 @@ TRANSCRIBE_BUSY = threading.Event()
 # Cache of loaded WhisperModel instances keyed by model size. Cold-start
 # pays the model-load cost once per size; subsequent transcribes reuse
 # the loaded instance. Two models max — "base" for fast/English/Auto
-# paths and "small" for Hindi/Urdu (needs Devanagari support).
+# paths and "medium" for Hindi/Urdu (needs robust Devanagari support).
 _MODELS: dict[str, "WhisperModel"] = {}  # type: ignore[name-defined]
 
 
-# Language → model picker. Hindi and Urdu need the bigger "small" model
-# (base outputs the wrong script for Devanagari/Nastaliq text). English,
-# auto-detect, and everything else stays on "base" — 3x faster and
-# accurate enough for Latin-script audio.
+# Language → model picker. Hindi / Urdu / other Indic scripts go to the
+# heavier "medium" model — small still confused Devanagari with Urdu on
+# longer clips. English, auto-detect, and everything else stays on
+# "base" — 5-10x faster and accurate enough for Latin-script audio.
 _HEAVY_LANGUAGES = {"hi", "ur", "bn", "ta", "te", "mr", "gu", "kn", "pa", "ml"}
 
 
 def _pick_model_size(language: Optional[str]) -> str:
-    """Smart routing: heavy-script langs get 'small', everyone else
+    """Smart routing: heavy-script langs get 'medium', everyone else
     gets 'base'. Env var override (WHISPER_MODEL) wins for testing."""
     forced = os.environ.get("WHISPER_MODEL")
     if forced:
         return forced
     if language and language.lower() in _HEAVY_LANGUAGES:
-        return "small"
+        return "medium"
     return "base"
 
 

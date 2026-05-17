@@ -229,6 +229,11 @@ export type Job = {
   /** Project grouping. New jobs always have these; legacy jobs may not. */
   projectId: string | null;
   projectName: string | null;
+  /** Voice-pair → captions auto-chain pointers. Set on the parent
+   *  voice-pair job once its render finishes and the transcribe is
+   *  queued. The reverse pointer lives on the transcribe job. */
+  chainedCaptionsJobId?: string | null;
+  fromVoicePairJobId?: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -350,6 +355,10 @@ export const apiClient = {
       mode?: "single" | "slideshow";
       projectName?: string;
       projectId?: string;
+      /** Language hint for the auto-chained captions transcribe.
+       *  "auto" lets Whisper detect; "hi"/"ur"/etc. routes to the
+       *  medium model that handles Devanagari/Nastaliq correctly. */
+      language?: string;
     } = {},
   ) => {
     const fd = new FormData();
@@ -365,6 +374,7 @@ export const apiClient = {
     if (opts.label) fd.append("label", opts.label);
     if (opts.projectName) fd.append("projectName", opts.projectName);
     if (opts.projectId) fd.append("projectId", opts.projectId);
+    if (opts.language) fd.append("language", opts.language);
     return api<{
       queued: {
         id: string;

@@ -204,6 +204,12 @@ def serialize_job(doc: dict) -> dict:
         # can group recent jobs into folders without parsing params.
         "projectId": doc.get("projectId"),
         "projectName": doc.get("projectName"),
+        # Auto-chain: voice-pair jobs spawn a captions-transcribe job on
+        # their rendered mp4 so the user can jump straight into the
+        # captions editor. The voice-pair card surfaces a CTA pointing
+        # at this id; the transcribe carries the reverse pointer.
+        "chainedCaptionsJobId": doc.get("chainedCaptionsJobId"),
+        "fromVoicePairJobId": params.get("fromVoicePairJobId"),
         "createdAt": _iso(doc.get("createdAt")),
         "updatedAt": _iso(doc.get("updatedAt")),
     }

@@ -36,15 +36,15 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # Pre-bake BOTH faster-whisper models into the image so cold starts
 # never block on a download.
-#   - "base"  (~140MB): English / auto-detect / Latin-script audio. ~3x
-#     faster than 'small', what most users actually want.
-#   - "small" (~460MB): Hindi / Urdu / other Indic scripts where 'base'
-#     would output the wrong script (Urdu instead of Devanagari, etc.)
+#   - "base"   (~140MB): English / auto-detect / Latin-script audio. ~5x
+#     faster than 'medium', what most users actually want.
+#   - "medium" (~1.5GB): Hindi / Urdu / other Indic scripts where 'base'
+#     and 'small' would confuse Devanagari with Urdu on longer clips.
 # tools/whisper_local.py picks between them based on the user's
-# Language picker selection. Image size +600MB total; cold start is
+# Language picker selection. Image size +1.6GB total; cold start is
 # instant for either path.
 ENV WHISPER_CACHE_DIR=/opt/whisper-models
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8', download_root='/opt/whisper-models'); WhisperModel('small', device='cpu', compute_type='int8', download_root='/opt/whisper-models')"
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8', download_root='/opt/whisper-models'); WhisperModel('medium', device='cpu', compute_type='int8', download_root='/opt/whisper-models')"
 
 COPY . .
 

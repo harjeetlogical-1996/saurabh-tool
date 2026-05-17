@@ -30,6 +30,8 @@ from jobs import (
     unregister_proc,
     update_job,
     get_job,
+    create_job,
+    enqueue,
 )
 from media_probe import audio_duration_seconds
 
@@ -522,3 +524,45 @@ def handle(job_id: str, user_id: str, params: dict) -> None:
         outputContentType="video/mp4",
         videoDuration=voice_dur,
     )
+
+    # Auto-chain: queue a captions-transcribe job on the rendered mp4 so
+    # the user can jump straight into the captions editor without re-
+    # uploading. Carries the voice-pair's projectId forward when present
+    # (the captions library groups by project, so the new transcribe
+    # appears under the same bucket).
+    parent_doc = get_job(job_id) or {}
+    label_src = (
+        params.get("label")
+        or params.get("mediaFilename")
+        or out_path.stem
+    )
+    caption_params = {
+        "videoPath": str(out_path),
+        "videoFilename": f"{label_src}.mp4",
+        "label": label_src,
+        "userPlan": params.get("userPlan") or "",
+        # Inherit the language from the voice-pair submit so Hindi/Urdu
+        # audio routes to the medium whisper model. Falls back to auto.
+        "language": (params.get("captionsLanguage") or "auto"),
+        # Tag the auto-chained job so the UI can show "Captioned from
+        # Voice Pair" instead of a plain transcribe.
+        "fromVoicePairJobId": job_id,
+    }
+    try:
+        cap_jid = create_job(
+            user_id=user_id,
+            tool="bulk-captions",
+            params=caption_params,
+            project_id=parent_doc.get("projectId"),
+            project_name=parent_doc.get("projectName"),
+        )
+        enqueue(cap_jid, user_id)
+        # Record the chained captions job ID on the voice-pair job so the
+        # frontend can render a CTA pointing at the right transcribe.
+        update_job(job_id, chainedCaptionsJobId=cap_jid)
+        print(f"[voice_pair] auto-queued captions transcribe {cap_jid} for voice-pair {job_id}")
+    except Exception as e:
+        # Auto-caption is best-effort — never fail the voice-pair render
+        # because the chained job couldn't be queued. The user can still
+        # download the mp4 and upload to captions manually.
+        print(f"[voice_pair] auto-caption chain failed for {job_id}: {e!r}")

@@ -1330,6 +1330,11 @@ async def submit_voice_pair(
     label: str = Form(""),
     projectName: str = Form(""),
     projectId: str = Form(""),
+    # Language hint for the auto-chained captions transcribe. "auto"
+    # lets Whisper detect; "hi"/"ur"/etc. routes to the medium model
+    # that handles Devanagari/Nastaliq correctly. Stored on each
+    # voice-pair job's params and passed to the chained captions job.
+    language: str = Form("auto"),
     user: AuthUser = Depends(current_user),
 ):
     """
@@ -1451,6 +1456,9 @@ async def submit_voice_pair(
                 "voiceDurationSec": voice_dur,
                 "label": label[:80] if label else "",
                 "userPlan": user.plan,
+                # Carried into the auto-chained captions transcribe so
+                # Hindi/Urdu audio uses the medium whisper model.
+                "captionsLanguage": (language or "auto").lower(),
             }
             display_name = f"Slideshow · {len(pair_media)} items"
         else:
@@ -1466,6 +1474,9 @@ async def submit_voice_pair(
                 "voiceDurationSec": voice_dur,
                 "label": label[:80] if label else "",
                 "userPlan": user.plan,
+                # Carried into the auto-chained captions transcribe so
+                # Hindi/Urdu audio uses the medium whisper model.
+                "captionsLanguage": (language or "auto").lower(),
             }
             display_name = m_name
 

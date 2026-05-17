@@ -191,6 +191,42 @@ export default function BulkCaptionsPage() {
     refreshJobs();
   }, [refreshJobs]);
 
+  // Deep-link support: ?open=<jobId> opens that transcribe in the
+  // editor as soon as it appears in the jobs list. Used by the voice-
+  // pair tool to bounce the user from their finished render straight
+  // into the captions editor. We wait for the job to be present AND
+  // done (transcribe finished) before flipping editingId on so the
+  // editor doesn't open against an empty transcript.
+  const [pendingOpenId, setPendingOpenId] = useState<string | null>(null);
+  // Embed mode: this page is rendered inside an iframe by the
+  // voice-pair tool. We hide the library/upload chrome and postMessage
+  // up to the parent when the editor closes so the modal dismisses.
+  const [isEmbed, setIsEmbed] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("open");
+    const embed = params.get("embed") === "1";
+    if (embed) setIsEmbed(true);
+    if (id) {
+      setPendingOpenId(id);
+      // Strip params so a refresh doesn't keep re-triggering the open
+      // (we keep embed=1 because it's load-time only too).
+      const u = new URL(window.location.href);
+      u.searchParams.delete("open");
+      u.searchParams.delete("embed");
+      window.history.replaceState({}, "", u.toString());
+    }
+  }, []);
+  useEffect(() => {
+    if (!pendingOpenId) return;
+    const job = transcribeJobs.find((j) => j.id === pendingOpenId);
+    if (job && job.status === "done") {
+      setEditingId(pendingOpenId);
+      setPendingOpenId(null);
+    }
+  }, [pendingOpenId, transcribeJobs]);
+
   // Poll faster while anything is in flight.
   useEffect(() => {
     const anyActive =
@@ -360,19 +396,26 @@ export default function BulkCaptionsPage() {
   }, [editingJob, transcribeJobs]);
 
   return (
-    <div className="px-6 md:px-10 py-10 md:py-14 max-w-[1400px] mx-auto">
-      <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--muted)] font-mono">
-        Tool
-      </div>
-      <h1 className="mt-3 font-display text-[28px] md:text-[36px] tracking-[-0.035em] leading-[1.05]">
-        Caption your videos
-      </h1>
-      <p className="mt-4 text-[15px] leading-[1.7] text-[var(--muted)] max-w-[680px]">
-        Upload finished videos. We transcribe them with your Gemini key, then
-        you tune the caption style on top of the actual video before rendering.
-        Re-render with a different style anytime — transcription is cached so
-        only the burn-in costs.
-      </p>
+    <div className={isEmbed ? "" : "px-6 md:px-10 py-10 md:py-14 max-w-[1400px] mx-auto"}>
+      {/* Page header / intro — hidden in embed mode where only the
+          editor modal matters. The wrapping voice-pair page provides
+          its own context (close button, page chrome). */}
+      {!isEmbed && (
+        <>
+          <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--muted)] font-mono">
+            Tool
+          </div>
+          <h1 className="mt-3 font-display text-[28px] md:text-[36px] tracking-[-0.035em] leading-[1.05]">
+            Caption your videos
+          </h1>
+          <p className="mt-4 text-[15px] leading-[1.7] text-[var(--muted)] max-w-[680px]">
+            Upload finished videos. We transcribe them with your Gemini key, then
+            you tune the caption style on top of the actual video before rendering.
+            Re-render with a different style anytime — transcription is cached so
+            only the burn-in costs.
+          </p>
+        </>
+      )}
 
       {state.status === "unauthenticated" && (
         <Banner kind="warn">
@@ -395,7 +438,18 @@ export default function BulkCaptionsPage() {
         <Editor
           job={editingJob}
           renders={rendersByParent.get(editingJob.id) ?? []}
-          onClose={() => setEditingId(null)}
+          onClose={() => {
+            setEditingId(null);
+            // In embed mode we don't show the rest of the page, so
+            // closing the editor should dismiss the wrapping modal
+            // instead of leaving the user staring at a blank iframe.
+            if (isEmbed && typeof window !== "undefined") {
+              window.parent?.postMessage(
+                { type: "captions-editor-closed" },
+                "*",
+              );
+            }
+          }}
           onRendered={async (opts) => {
             // Remember this render's settings for the "Apply to all"
             // bulk action on the library. Only fires on successful
@@ -412,7 +466,7 @@ export default function BulkCaptionsPage() {
         />
       )}
 
-      {!editingJob && (
+      {!editingJob && !isEmbed && (
         <div className="mt-10 rounded-xl border border-[var(--line)] bg-[var(--surface)] p-6 md:p-8">
           <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--muted)] font-mono">
             Step 1
@@ -548,22 +602,27 @@ export default function BulkCaptionsPage() {
         </div>
       )}
 
-      {/* Library — every transcribed video, with status & open-editor button. */}
-      <Library
-        jobs={transcribeJobs}
-        rendersByParent={rendersByParent}
-        editingId={editingId}
-        onEdit={setEditingId}
-        lastUsedOpts={lastUsedOpts}
-        bulkBusy={bulkBusy}
-        bulkNotice={bulkNotice}
-        bulkError={bulkError}
-        onApplyToAll={async (parentIds) => {
-          if (!lastUsedOpts) return;
-          await runBulkApply(parentIds, lastUsedOpts);
-        }}
-        onApplyOptsToParents={runBulkApply}
-      />
+      {/* Library — every transcribed video, with status & open-editor
+          button. Skipped entirely in embed mode (voice-pair has its
+          own library; showing another one inside the iframe would be
+          confusing and duplicate-fetch jobs the user already sees). */}
+      {!isEmbed && (
+        <Library
+          jobs={transcribeJobs}
+          rendersByParent={rendersByParent}
+          editingId={editingId}
+          onEdit={setEditingId}
+          lastUsedOpts={lastUsedOpts}
+          bulkBusy={bulkBusy}
+          bulkNotice={bulkNotice}
+          bulkError={bulkError}
+          onApplyToAll={async (parentIds) => {
+            if (!lastUsedOpts) return;
+            await runBulkApply(parentIds, lastUsedOpts);
+          }}
+          onApplyOptsToParents={runBulkApply}
+        />
+      )}
     </div>
   );
 }
@@ -618,7 +677,7 @@ const DEFAULT_OPTS: RenderOpts = {
   shadow: null,
 };
 
-type EditorTab = "style" | "layout" | "customize" | "text";
+type EditorTab = "style" | "layout" | "text";
 
 /** Backend named-colour palette mirrored here so the Customize tab can
  *  show the real preset colours in the swatch picker — without this the
@@ -649,9 +708,12 @@ const NAMED_COLOR_HEX: Record<string, string> = {
 };
 
 /** A subset of every backend STYLE_PRESETS field the Customize tab
- *  needs to render the "default" state when an override is null. Kept
- *  in sync by hand with api/tools/captions.py — values are the same
- *  semantics: outlineWidth is % of font size, bgAlpha 0=opaque etc. */
+ *  needs. Kept in sync by hand with api/tools/captions.py.
+ *  - outlineWidth / shadow: percentages of font size (NOT abs px)
+ *  - bgAlpha: 0=opaque, 255=transparent
+ *  - useBack: when false, the preset has NO background pill — UI hides
+ *    bg-color + bg-opacity controls so users don't fiddle with values
+ *    that don't apply to this style. */
 const STYLE_PRESET_DEFAULTS: Record<string, {
   primaryColor: string;
   outlineColor: string;
@@ -661,24 +723,25 @@ const STYLE_PRESET_DEFAULTS: Record<string, {
   fontSizeRatio: number;
   shadow: number;
   fontFamily: string;
+  useBack: boolean;
 }> = {
-  plain:      { primaryColor: "white",  outlineColor: "black",   outlineWidth: 9,  bgColor: "black",   bgAlpha: 80,  fontSizeRatio: 0.045, shadow: 0, fontFamily: "Inter" },
-  highlight:  { primaryColor: "white",  outlineColor: "black",   outlineWidth: 5,  bgColor: "cyan",    bgAlpha: 0,   fontSizeRatio: 0.045, shadow: 0, fontFamily: "Inter" },
-  karaoke:    { primaryColor: "yellow", outlineColor: "black",   outlineWidth: 7,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 0, fontFamily: "Inter" },
-  outline:    { primaryColor: "cyan",   outlineColor: "black",   outlineWidth: 13, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 0, fontFamily: "Inter" },
-  neon:       { primaryColor: "white",  outlineColor: "cyan",    outlineWidth: 16, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 7, fontFamily: "Inter" },
-  gradient:   { primaryColor: "cyan",   outlineColor: "navy",    outlineWidth: 11, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.052, shadow: 0, fontFamily: "Inter" },
-  typewriter: { primaryColor: "white",  outlineColor: "black",   outlineWidth: 5,  bgColor: "black",   bgAlpha: 0,   fontSizeRatio: 0.04,  shadow: 0, fontFamily: "Courier New" },
-  news:       { primaryColor: "white",  outlineColor: "darkred", outlineWidth: 10, bgColor: "darkred", bgAlpha: 0,   fontSizeRatio: 0.044, shadow: 0, fontFamily: "Inter" },
-  cinema:     { primaryColor: "white",  outlineColor: "black",   outlineWidth: 9,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.038, shadow: 0, fontFamily: "Inter" },
-  mrbeast:    { primaryColor: "yellow", outlineColor: "black",   outlineWidth: 12, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.058, shadow: 4, fontFamily: "Anton" },
-  reels:      { primaryColor: "lime",   outlineColor: "black",   outlineWidth: 10, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.055, shadow: 0, fontFamily: "Anton" },
-  tiktok:     { primaryColor: "white",  outlineColor: "hotpink", outlineWidth: 10, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.053, shadow: 3, fontFamily: "Anton" },
-  whisper:    { primaryColor: "silver", outlineColor: "black",   outlineWidth: 6,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.036, shadow: 0, fontFamily: "Inter" },
-  underline:  { primaryColor: "white",  outlineColor: "cyan",    outlineWidth: 12, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.046, shadow: 0, fontFamily: "Inter" },
-  sticker:    { primaryColor: "cream",  outlineColor: "white",   outlineWidth: 9,  bgColor: "black",   bgAlpha: 0,   fontSizeRatio: 0.046, shadow: 0, fontFamily: "Inter" },
-  comic:      { primaryColor: "yellow", outlineColor: "black",   outlineWidth: 11, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.054, shadow: 3, fontFamily: "Bangers" },
-  retro:      { primaryColor: "amber",  outlineColor: "darkred", outlineWidth: 9,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 5, fontFamily: "Anton" },
+  plain:      { primaryColor: "white",  outlineColor: "black",   outlineWidth: 9,  bgColor: "black",   bgAlpha: 80,  fontSizeRatio: 0.045, shadow: 0, fontFamily: "Inter",       useBack: true  },
+  highlight:  { primaryColor: "white",  outlineColor: "black",   outlineWidth: 5,  bgColor: "cyan",    bgAlpha: 0,   fontSizeRatio: 0.045, shadow: 0, fontFamily: "Inter",       useBack: true  },
+  karaoke:    { primaryColor: "yellow", outlineColor: "black",   outlineWidth: 7,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 0, fontFamily: "Inter",       useBack: false },
+  outline:    { primaryColor: "cyan",   outlineColor: "black",   outlineWidth: 13, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 0, fontFamily: "Inter",       useBack: false },
+  neon:       { primaryColor: "white",  outlineColor: "cyan",    outlineWidth: 16, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 7, fontFamily: "Inter",       useBack: false },
+  gradient:   { primaryColor: "cyan",   outlineColor: "navy",    outlineWidth: 11, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.052, shadow: 0, fontFamily: "Inter",       useBack: false },
+  typewriter: { primaryColor: "white",  outlineColor: "black",   outlineWidth: 5,  bgColor: "black",   bgAlpha: 0,   fontSizeRatio: 0.04,  shadow: 0, fontFamily: "Courier New", useBack: true  },
+  news:       { primaryColor: "white",  outlineColor: "darkred", outlineWidth: 10, bgColor: "darkred", bgAlpha: 0,   fontSizeRatio: 0.044, shadow: 0, fontFamily: "Inter",       useBack: true  },
+  cinema:     { primaryColor: "white",  outlineColor: "black",   outlineWidth: 9,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.038, shadow: 0, fontFamily: "Inter",       useBack: false },
+  mrbeast:    { primaryColor: "yellow", outlineColor: "black",   outlineWidth: 12, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.058, shadow: 4, fontFamily: "Anton",       useBack: false },
+  reels:      { primaryColor: "lime",   outlineColor: "black",   outlineWidth: 10, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.055, shadow: 0, fontFamily: "Anton",       useBack: false },
+  tiktok:     { primaryColor: "white",  outlineColor: "hotpink", outlineWidth: 10, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.053, shadow: 3, fontFamily: "Anton",       useBack: false },
+  whisper:    { primaryColor: "silver", outlineColor: "black",   outlineWidth: 6,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.036, shadow: 0, fontFamily: "Inter",       useBack: false },
+  underline:  { primaryColor: "white",  outlineColor: "cyan",    outlineWidth: 12, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.046, shadow: 0, fontFamily: "Inter",       useBack: false },
+  sticker:    { primaryColor: "cream",  outlineColor: "white",   outlineWidth: 9,  bgColor: "black",   bgAlpha: 0,   fontSizeRatio: 0.046, shadow: 0, fontFamily: "Inter",       useBack: true  },
+  comic:      { primaryColor: "yellow", outlineColor: "black",   outlineWidth: 11, bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.054, shadow: 3, fontFamily: "Bangers",     useBack: false },
+  retro:      { primaryColor: "amber",  outlineColor: "darkred", outlineWidth: 9,  bgColor: "black",   bgAlpha: 255, fontSizeRatio: 0.05,  shadow: 5, fontFamily: "Anton",       useBack: false },
 };
 
 /** Resolve a colour value — either an explicit hex from a customize
@@ -910,9 +973,14 @@ function Editor({
       // "Apply this style to all other videos" library button.
       await onRendered(opts);
     } catch (e) {
-      setSubmitError(
-        e instanceof ApiError ? e.message : "Render failed to start.",
-      );
+      console.error("[captions submit] failed:", e);
+      const msg =
+        e instanceof ApiError
+          ? `${e.message} (HTTP ${e.status})`
+          : e instanceof Error
+            ? `Render failed: ${e.message}`
+            : "Render failed to start.";
+      setSubmitError(msg);
     } finally {
       setSubmitting(false);
     }
@@ -1083,7 +1151,6 @@ function Editor({
             [
               { id: "style", label: "Style" },
               { id: "layout", label: "Layout" },
-              { id: "customize", label: "Customize" },
               { id: "text", label: "Text" },
             ] as const
           ).map((t) => {
@@ -1238,183 +1305,6 @@ function Editor({
               </Field>
             </div>
           )}
-
-          {tab === "customize" && (() => {
-            // Pull the active style's defaults so the Customize tab
-            // displays the right colours / sliders before the user has
-            // touched anything. Any explicit override (non-null in opts)
-            // still wins over the preset; the preset only fills in the
-            // "no override yet" state so the picker doesn't look empty.
-            const preset =
-              STYLE_PRESET_DEFAULTS[opts.style] ?? STYLE_PRESET_DEFAULTS.plain;
-            const defaultPrimaryHex = resolveColor(null, preset.primaryColor);
-            const defaultOutlineHex = resolveColor(null, preset.outlineColor);
-            const defaultBgHex = resolveColor(null, preset.bgColor);
-            // Default font size in px = ratio × current video height
-            // (falls back to 1080 if the parent job hasn't reported
-            // dimensions yet). FONT_SCALE 0.95 matches the backend.
-            const videoH = job.videoHeight || 1080;
-            const defaultFontSize = Math.round(
-              videoH * preset.fontSizeRatio * 0.95,
-            );
-            const defaultBgOpacityPct = Math.round(
-              ((255 - preset.bgAlpha) / 255) * 100,
-            );
-
-            return (
-            <div className="space-y-5">
-              <p className="text-[11.5px] text-[var(--muted)] leading-[1.55]">
-                Tweak the picked style. Each field starts at the{" "}
-                <strong className="text-white">{opts.style}</strong> preset
-                default — hit reset to revert any change.
-              </p>
-
-              <ColorRow
-                label="Text color"
-                value={opts.primaryColor}
-                defaultHex={defaultPrimaryHex}
-                onChange={(v) =>
-                  setOpts((o) => ({ ...o, primaryColor: v }))
-                }
-              />
-              <ColorRow
-                label="Outline color"
-                value={opts.outlineColor}
-                defaultHex={defaultOutlineHex}
-                onChange={(v) =>
-                  setOpts((o) => ({ ...o, outlineColor: v }))
-                }
-              />
-              <SliderRow
-                label="Outline thickness"
-                // outline_width in presets is % of font size; slider
-                // shows the raw % so the user can dial in a "12% of
-                // font" stroke regardless of resolution.
-                value={opts.outlineWidth ?? preset.outlineWidth}
-                min={0}
-                max={40}
-                step={1}
-                unit="%"
-                isOverridden={opts.outlineWidth !== null}
-                onChange={(v) =>
-                  setOpts((o) => ({ ...o, outlineWidth: v }))
-                }
-                onReset={() =>
-                  setOpts((o) => ({ ...o, outlineWidth: null }))
-                }
-              />
-
-              <ColorRow
-                label="Background color"
-                value={opts.bgColor}
-                defaultHex={defaultBgHex}
-                onChange={(v) => setOpts((o) => ({ ...o, bgColor: v }))}
-              />
-              <SliderRow
-                label="Background opacity"
-                value={
-                  opts.bgAlpha === null
-                    ? defaultBgOpacityPct
-                    : Math.round(((255 - opts.bgAlpha) / 255) * 100)
-                }
-                min={0}
-                max={100}
-                step={5}
-                unit="%"
-                isOverridden={opts.bgAlpha !== null}
-                onChange={(v) =>
-                  // UI shows 0..100% opaque; backend wants alpha 0=opaque
-                  // 255=transparent. Invert.
-                  setOpts((o) => ({
-                    ...o,
-                    bgAlpha: Math.round(255 - (v / 100) * 255),
-                  }))
-                }
-                onReset={() => setOpts((o) => ({ ...o, bgAlpha: null }))}
-              />
-
-              <SliderRow
-                label="Font size"
-                value={opts.fontSize ?? defaultFontSize}
-                min={16}
-                max={140}
-                step={2}
-                unit="px"
-                isOverridden={opts.fontSize !== null}
-                onChange={(v) => setOpts((o) => ({ ...o, fontSize: v }))}
-                onReset={() => setOpts((o) => ({ ...o, fontSize: null }))}
-              />
-
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11.5px] uppercase tracking-[0.18em] text-[var(--muted)] font-mono">
-                    Font family
-                  </span>
-                  {opts.fontFamily && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setOpts((o) => ({ ...o, fontFamily: null }))
-                      }
-                      className="text-[10.5px] text-[var(--muted)] hover:text-[var(--accent)] font-mono"
-                    >
-                      reset
-                    </button>
-                  )}
-                </div>
-                <select
-                  value={opts.fontFamily ?? ""}
-                  onChange={(e) =>
-                    setOpts((o) => ({
-                      ...o,
-                      fontFamily: e.target.value || null,
-                    }))
-                  }
-                  className="w-full rounded-md border border-[var(--line)] bg-[var(--bg)] px-3 py-2 text-[12.5px]"
-                >
-                  <option value="">Style default</option>
-                  {FONT_OPTIONS.map((f) => (
-                    <option key={f.v} value={f.v}>
-                      {f.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <SliderRow
-                label="Shadow / glow"
-                value={opts.shadow ?? 0}
-                min={0}
-                max={12}
-                step={1}
-                unit="px"
-                isOverridden={opts.shadow !== null}
-                onChange={(v) => setOpts((o) => ({ ...o, shadow: v }))}
-                onReset={() => setOpts((o) => ({ ...o, shadow: null }))}
-              />
-
-              <button
-                type="button"
-                onClick={() =>
-                  setOpts((o) => ({
-                    ...o,
-                    primaryColor: null,
-                    outlineColor: null,
-                    outlineWidth: null,
-                    bgColor: null,
-                    bgAlpha: null,
-                    fontSize: null,
-                    fontFamily: null,
-                    shadow: null,
-                  }))
-                }
-                className="mt-2 inline-flex h-8 items-center px-3 rounded-full border border-[var(--line)] text-[11.5px] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
-              >
-                Reset all to preset
-              </button>
-            </div>
-            );
-          })()}
 
           {tab === "text" && (
             <div className="max-w-[420px] space-y-4">
