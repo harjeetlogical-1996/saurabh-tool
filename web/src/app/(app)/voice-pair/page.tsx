@@ -25,6 +25,7 @@ import {
   type CaptionRenderOpts,
   type Job,
 } from "@/lib/api";
+import { compressVideoIfLarge } from "@/lib/videoCompress";
 
 type Animation = "static" | "ken_burns";
 type Mode = "single" | "slideshow";
@@ -508,10 +509,42 @@ export default function VoicePairPage() {
     setSubmitError(null);
     setSubmitNotice(null);
     try {
+      // Compress any oversized videos BEFORE upload — Cloud Run's
+      // 32 MB body limit drops big folder pairs otherwise. The helper
+      // is a no-op for files < 5MB and gracefully returns the original
+      // on any encode failure, so this loop never makes things worse.
+      const totalBigVideos = pairUnits.reduce(
+        (acc, u) =>
+          acc +
+          u.items.filter((m) => m.isVideo && m.file.size > 5 * 1024 * 1024)
+            .length,
+        0,
+      );
+      let compressed = 0;
+      const compressedFiles = new WeakMap<File, File>();
+      for (const unit of pairUnits) {
+        for (const m of unit.items) {
+          if (!m.isVideo) continue;
+          if (m.file.size <= 5 * 1024 * 1024) continue;
+          if (totalBigVideos > 0) {
+            setSubmitNotice(
+              `Compressing video ${compressed + 1}/${totalBigVideos}…`,
+            );
+          }
+          // Realtime-encoded (takes ~clip duration) so the user sees
+          // the notice tick forward.
+          const out = await compressVideoIfLarge(m.file);
+          if (out !== m.file) compressedFiles.set(m.file, out);
+          compressed++;
+        }
+      }
+      const fileOrCompressed = (orig: File): File =>
+        compressedFiles.get(orig) ?? orig;
+
       // Each pair = one pair-unit's media files + one voice. In
       // single mode the unit holds 1 file; in slideshow it holds N.
       const pairs = Array.from({ length: pairCount }, (_, i) => ({
-        media: pairUnits[i].items.map((m) => m.file),
+        media: pairUnits[i].items.map((m) => fileOrCompressed(m.file)),
         voice: voices[i].file,
         animation: pairUnits[i].items[0].animation,
       }));
