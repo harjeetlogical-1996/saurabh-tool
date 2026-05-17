@@ -30,6 +30,15 @@ RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt \
  && pip install --no-cache-dir razorpay==1.4.2
 
+# Pre-bake the faster-whisper "small" model into the image. Cloud Run
+# scales-to-zero by default, so without this every cold start would
+# re-download ~460MB before the first transcribe finished — a 30s+
+# delay the user would see as a frozen progress bar. Baking it in
+# trades image size (+460MB) for first-request latency. Override via
+# WHISPER_MODEL env var at deploy time if needed.
+ENV WHISPER_CACHE_DIR=/opt/whisper-models
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8', download_root='/opt/whisper-models')"
+
 COPY . .
 
 # Cloud Run gives us PORT (default 8080). The job worker pool lives

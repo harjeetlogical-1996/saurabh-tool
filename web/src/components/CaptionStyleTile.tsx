@@ -9,9 +9,8 @@ import { useEffect, useState } from "react";
  */
 
 export type CaptionStyle =
-  // Original 8
+  // Original 7 (Bold removed 2026-05)
   | "plain"
-  | "bold"
   | "highlight"
   | "karaoke"
   | "outline"
@@ -81,9 +80,14 @@ export function CaptionStyleTile({
         : "bottom-3";
 
   return (
+    // Tile container mirrors a 9:16 reel so the demo CSS sizes
+    // (declared in cqh below) come out at the SAME visual proportions
+    // as the rendered mp4. Without containerType:size, cqh units don't
+    // resolve and everything collapses to default font size.
     <div
       aria-hidden
-      className={`relative aspect-[21/9] rounded bg-gradient-to-br from-[#1c1f26] via-[#0e1014] to-[#1a1d24] overflow-hidden ${className}`}
+      className={`relative aspect-[9/16] rounded bg-gradient-to-br from-[#1c1f26] via-[#0e1014] to-[#1a1d24] overflow-hidden ${className}`}
+      style={{ containerType: "size" }}
     >
       <span
         className="absolute inset-0 opacity-30"
@@ -93,9 +97,6 @@ export function CaptionStyleTile({
           backgroundSize: "12px 12px",
         }}
       />
-      {/* whiteSpace:nowrap forces the demo phrase onto ONE line in every
-          style — chunky styles (MrBeast / Comic / Reels) were wrapping
-          to 2 lines on narrow grid cells. */}
       <div
         className={`absolute inset-x-0 ${verticalPos} flex justify-center px-2`}
         style={{ whiteSpace: "nowrap" }}
@@ -106,6 +107,13 @@ export function CaptionStyleTile({
   );
 }
 
+/**
+ * All sizes below are in `cqh` (container-query-height) units so the
+ * preview scales with the 9:16 tile container. Numbers track the
+ * backend STYLE_PRESETS in api/tools/captions.py — `font_size_ratio`
+ * × FONT_SCALE (0.95) × 100 = cqh value. Strokes are similarly tied
+ * to the backend `outline_width` so demo and render stay in sync.
+ */
 function StyledPhrase({
   style,
   words,
@@ -118,42 +126,17 @@ function StyledPhrase({
   if (style === "plain") {
     return (
       <span
-        className="inline-block rounded font-semibold leading-tight"
+        className="inline-block rounded font-bold leading-tight"
         style={{
-          background: "rgba(0,0,0,0.78)",
+          background: "rgba(0,0,0,0.69)",
           color: "#FFFFFF",
-          fontSize: "13px",
-          padding: "0.28em 0.85em",
+          paintOrder: "stroke fill",
+          WebkitTextStroke: "0.4cqh #000",
+          fontSize: "4.3cqh",
+          padding: "0.25em 0.6em",
         }}
       >
         {words.join(" ")}
-      </span>
-    );
-  }
-  if (style === "bold") {
-    return (
-      <span
-        className="inline-block font-extrabold leading-tight tracking-wide"
-        style={{
-          color: "#FFFFFF",
-          fontSize: "14px",
-          paintOrder: "stroke fill",
-          WebkitTextStroke: "2px #000",
-          textShadow:
-            "0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000",
-        }}
-      >
-        {words.map((w, i) => (
-          <span
-            key={i}
-            style={{
-              marginRight: i === words.length - 1 ? 0 : "0.25em",
-              color: i === activeIdx ? "#FFE04A" : "#FFFFFF",
-            }}
-          >
-            {w}
-          </span>
-        ))}
       </span>
     );
   }
@@ -162,11 +145,12 @@ function StyledPhrase({
       <span
         className="inline-block rounded font-bold leading-tight"
         style={{
-          background: "var(--accent)",
-          color: "#0a0a0a",
-          fontSize: "13px",
-          padding: "0.3em 0.85em",
-          boxShadow: "0 2px 8px rgba(0,240,255,0.3)",
+          background: "#00F0FF",
+          color: "#FFFFFF",
+          paintOrder: "stroke fill",
+          WebkitTextStroke: "0.2cqh #000",
+          fontSize: "4.3cqh",
+          padding: "0.25em 0.6em",
         }}
       >
         {words.join(" ")}
@@ -178,9 +162,9 @@ function StyledPhrase({
       <span
         className="inline-block font-extrabold leading-tight tracking-wide"
         style={{
-          fontSize: "14px",
+          fontSize: "4.8cqh",
           paintOrder: "stroke fill",
-          WebkitTextStroke: "2px #000",
+          WebkitTextStroke: "0.62cqh #000",
         }}
       >
         {words.map((w, i) => (
@@ -203,13 +187,13 @@ function StyledPhrase({
         className="inline-block font-extrabold leading-tight tracking-wide"
         style={{
           color: "#FFFFFF",
-          fontSize: "14px",
+          fontSize: "4.8cqh",
           paintOrder: "stroke fill",
-          WebkitTextStroke: "1.4px #00F0FF",
+          WebkitTextStroke: "0.77cqh #00F0FF",
           textShadow: [
-            "0 0 4px #00F0FF",
-            "0 0 8px #00F0FF",
-            "0 0 14px rgba(0,240,255,0.7)",
+            "0 0 0.7cqh #00F0FF",
+            "0 0 1.4cqh #00F0FF",
+            "0 0 2.5cqh rgba(0,240,255,0.7)",
           ].join(", "),
         }}
       >
@@ -233,11 +217,11 @@ function StyledPhrase({
         className="inline-block font-extrabold leading-tight tracking-wide"
         style={{
           color: "#00F0FF",
-          fontSize: "14px",
+          fontSize: "4.9cqh",
           paintOrder: "stroke fill",
-          WebkitTextStroke: "2px #0B2A4A",
+          WebkitTextStroke: "1cqh #0B2A4A",
           textShadow:
-            "0 1px 0 rgba(255,255,255,0.4), 0 -1px 0 rgba(0,0,0,0.6)",
+            "0 0.15cqh 0 rgba(255,255,255,0.4), 0 -0.15cqh 0 rgba(0,0,0,0.6)",
         }}
       >
         {words.join(" ")}
@@ -245,31 +229,20 @@ function StyledPhrase({
     );
   }
   if (style === "typewriter") {
-    const visible = words.slice(0, activeIdx + 1).join(" ");
     return (
       <span
         className="inline-block font-medium leading-tight"
         style={{
           background: "#000",
           color: "#FFFFFF",
-          fontSize: "12px",
+          fontSize: "3.8cqh",
           padding: "0.18em 0.6em",
           fontFamily:
             '"JetBrains Mono", "Courier New", ui-monospace, monospace',
           letterSpacing: "0.02em",
         }}
       >
-        {visible}
-        <span
-          style={{
-            display: "inline-block",
-            width: "0.55em",
-            marginLeft: "0.05em",
-            color: "#FFE04A",
-          }}
-        >
-          |
-        </span>
+        {words.join(" ")}
       </span>
     );
   }
@@ -280,10 +253,9 @@ function StyledPhrase({
         style={{
           background: "#B30000",
           color: "#FFFFFF",
-          fontSize: "13px",
-          padding: "0.3em 0.95em",
+          fontSize: "4.2cqh",
+          padding: "0.22em 0.8em",
           letterSpacing: "0.02em",
-          boxShadow: "0 2px 6px rgba(179,0,0,0.4)",
         }}
       >
         {words.join(" ")}
@@ -296,10 +268,10 @@ function StyledPhrase({
         className="inline-block leading-tight"
         style={{
           color: "#FFFFFF",
-          fontSize: "12.5px",
+          fontSize: "3.6cqh",
           fontWeight: 500,
-          textShadow:
-            "0 1px 2px rgba(0,0,0,0.95), 0 0 3px rgba(0,0,0,0.8)",
+          paintOrder: "stroke fill",
+          WebkitTextStroke: "0.6cqh #000",
           fontStyle: "italic",
         }}
       >
@@ -313,13 +285,12 @@ function StyledPhrase({
         className="inline-block leading-none tracking-tight"
         style={{
           fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
-          fontSize: "15px",
+          fontSize: "5.5cqh",
           fontWeight: 400,
           color: "#FFE04A",
           paintOrder: "stroke fill",
-          WebkitTextStroke: "3px #000",
-          textShadow:
-            "0 2px 0 #000, 0 3px 4px rgba(0,0,0,0.7)",
+          WebkitTextStroke: "0.66cqh #000",
+          textShadow: "0 0.22cqh 0 #000",
         }}
       >
         {words.join(" ").toUpperCase()}
@@ -332,13 +303,11 @@ function StyledPhrase({
         className="inline-block leading-tight tracking-wide"
         style={{
           fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
-          fontSize: "14px",
+          fontSize: "5.2cqh",
           fontWeight: 400,
           color: "#B6FF3C",
           paintOrder: "stroke fill",
-          WebkitTextStroke: "2px #000",
-          textShadow:
-            "0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000",
+          WebkitTextStroke: "0.52cqh #000",
         }}
       >
         {words.join(" ").toUpperCase()}
@@ -351,13 +320,12 @@ function StyledPhrase({
         className="inline-block leading-tight"
         style={{
           fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
-          fontSize: "15px",
+          fontSize: "5cqh",
           fontWeight: 400,
           color: "#FFFFFF",
           paintOrder: "stroke fill",
-          WebkitTextStroke: "2px #FF1493",
-          textShadow:
-            "0 0 6px rgba(255,20,147,0.7), 0 0 10px rgba(255,20,147,0.4)",
+          WebkitTextStroke: "0.5cqh #FF1493",
+          textShadow: "0 0.15cqh 0 rgba(255,20,147,0.6)",
         }}
       >
         {words.join(" ")}
@@ -370,8 +338,10 @@ function StyledPhrase({
         className="inline-block leading-tight"
         style={{
           color: "#C0C0C0",
-          fontSize: "11.5px",
+          fontSize: "3.4cqh",
           fontWeight: 400,
+          paintOrder: "stroke fill",
+          WebkitTextStroke: "0.2cqh #000",
           letterSpacing: "0.04em",
         }}
       >
@@ -382,13 +352,12 @@ function StyledPhrase({
   if (style === "underline") {
     return (
       <span
-        className="inline-block font-bold leading-tight"
+        className="inline-block font-extrabold leading-tight tracking-wide"
         style={{
           color: "#FFFFFF",
-          fontSize: "13px",
-          padding: "0.16em 0.7em 0.24em",
-          background:
-            "linear-gradient(to top, rgba(0,240,255,0.85) 0%, rgba(0,240,255,0.85) 24%, transparent 24%)",
+          fontSize: "4.4cqh",
+          paintOrder: "stroke fill",
+          WebkitTextStroke: "1cqh #00F0FF",
         }}
       >
         {words.join(" ")}
@@ -402,11 +371,10 @@ function StyledPhrase({
         style={{
           background: "#000",
           color: "#FFF1D0",
-          fontSize: "12.5px",
-          padding: "0.3em 0.95em",
-          border: "2.5px solid #FFF",
-          borderRadius: "999px",
-          boxShadow: "0 3px 8px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.08)",
+          fontSize: "4.4cqh",
+          padding: "0.22em 0.7em",
+          // libass can't do rounded corners — keep square.
+          border: "0.75cqh solid #FFF",
         }}
       >
         {words.join(" ")}
@@ -419,13 +387,13 @@ function StyledPhrase({
         className="inline-block leading-none tracking-tight"
         style={{
           fontFamily: 'var(--font-bangers), "Bangers", "Impact", system-ui',
-          fontSize: "16px",
+          fontSize: "5.1cqh",
           fontWeight: 400,
           color: "#FFE04A",
           paintOrder: "stroke fill",
-          WebkitTextStroke: "2.5px #000",
+          WebkitTextStroke: "0.56cqh #000",
           textShadow:
-            "1px 1px 0 #000, 2px 2px 0 #000, 3px 3px 0 rgba(0,0,0,0.5)",
+            "0.2cqh 0.2cqh 0 #000, 0.4cqh 0.4cqh 0 #000, 0.6cqh 0.6cqh 0 rgba(0,0,0,0.5)",
         }}
       >
         {words.join(" ").toUpperCase()}
@@ -438,13 +406,12 @@ function StyledPhrase({
         className="inline-block leading-tight tracking-wide"
         style={{
           fontFamily: 'var(--font-anton), "Anton", Impact, sans-serif',
-          fontSize: "13px",
+          fontSize: "4.8cqh",
           fontWeight: 400,
           color: "#FFC107",
           paintOrder: "stroke fill",
-          WebkitTextStroke: "2px #B30000",
-          textShadow:
-            "0 0 6px rgba(255,193,7,0.6), 0 0 12px rgba(179,0,0,0.4)",
+          WebkitTextStroke: "0.43cqh #B30000",
+          textShadow: "0.24cqh 0.24cqh 0 rgba(179,0,0,0.7)",
           letterSpacing: "0.06em",
         }}
       >
@@ -456,7 +423,7 @@ function StyledPhrase({
   return (
     <span
       className="inline-block font-extrabold leading-tight"
-      style={{ fontSize: "14px" }}
+      style={{ fontSize: "4.8cqh" }}
     >
       {words.map((w, i) => (
         <span
@@ -466,9 +433,7 @@ function StyledPhrase({
             marginRight: i === words.length - 1 ? 0 : "0.25em",
             color: i === activeIdx ? "#FFE04A" : "#FFFFFF",
             paintOrder: "stroke fill",
-            WebkitTextStroke: "1.3px #000",
-            textShadow:
-              "0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000",
+            WebkitTextStroke: "0.6cqh #000",
           }}
         >
           {w}

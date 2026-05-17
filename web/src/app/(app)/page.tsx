@@ -46,6 +46,13 @@ export default function WorkspaceHome() {
           blurb="Bulk-upload finished videos and burn captions in. 18 styles + per-render customize, drag-to-position, transcript cached so style swaps are free."
           status="ready"
         />
+        <ToolCard
+          href="/voice-pair"
+          eyebrow="Voice · Media"
+          title="Voice Pair"
+          blurb="Pair images or videos with voices. Each pair renders one mp4 — images stay still or pan, short videos loop until the voice ends. Free."
+          status="ready"
+        />
       </div>
 
       {/* Get-started panel */}

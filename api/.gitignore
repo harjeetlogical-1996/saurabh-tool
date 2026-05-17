@@ -6,3 +6,8 @@ __pycache__
 uploads
 outputs
 .DS_Store
+# Local test artifacts produced by scripts/test_all_caption_styles.py etc.
+test_hi_audio.mp3
+test_*.mp3
+test_*.png
+test_*.mp4

@@ -124,9 +124,16 @@ def _coll():
     return db().tool_jobs
 
 
-def create_job(*, user_id: str, tool: str, params: dict[str, Any]) -> str:
+def create_job(
+    *,
+    user_id: str,
+    tool: str,
+    params: dict[str, Any],
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> str:
     now = datetime.now(timezone.utc)
-    doc = {
+    doc: dict[str, Any] = {
         "userId": user_id,
         "tool": tool,
         "params": params,
@@ -139,6 +146,12 @@ def create_job(*, user_id: str, tool: str, params: dict[str, Any]) -> str:
         "createdAt": now,
         "updatedAt": now,
     }
+    # Top-level project fields so /me/projects can index/group cheaply
+    # without parsing nested params on every job.
+    if project_id:
+        doc["projectId"] = project_id
+    if project_name:
+        doc["projectName"] = project_name
     res = _coll().insert_one(doc)
     return str(res.inserted_id)
 
@@ -187,6 +200,10 @@ def serialize_job(doc: dict) -> dict:
         # surface "X of Y frames used fallback" instead of silently
         # showing placeholders.
         "frameQuality": doc.get("frameQuality"),
+        # Project grouping (added 2026-05). Top-level fields so the UI
+        # can group recent jobs into folders without parsing params.
+        "projectId": doc.get("projectId"),
+        "projectName": doc.get("projectName"),
         "createdAt": _iso(doc.get("createdAt")),
         "updatedAt": _iso(doc.get("updatedAt")),
     }
@@ -382,14 +399,22 @@ def requeue_blocked(user_id: str) -> int:
     return n
 
 
-def create_blocked_job(*, user_id: str, tool: str, params: dict[str, Any], reason: str) -> str:
+def create_blocked_job(
+    *,
+    user_id: str,
+    tool: str,
+    params: dict[str, Any],
+    reason: str,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> str:
     """
     Same as create_job but starts in 'blocked' state. Used when the user
     submits more work than their free tier allows — we accept the upload
     so they don't have to re-upload after subscribing.
     """
     now = datetime.now(timezone.utc)
-    doc = {
+    doc: dict[str, Any] = {
         "userId": user_id,
         "tool": tool,
         "params": params,
@@ -402,6 +427,10 @@ def create_blocked_job(*, user_id: str, tool: str, params: dict[str, Any], reaso
         "createdAt": now,
         "updatedAt": now,
     }
+    if project_id:
+        doc["projectId"] = project_id
+    if project_name:
+        doc["projectName"] = project_name
     res = _coll().insert_one(doc)
     return str(res.inserted_id)
 

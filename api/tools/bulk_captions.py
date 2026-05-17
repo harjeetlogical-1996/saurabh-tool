@@ -128,11 +128,13 @@ def handle(job_id: str, user_id: str, params: dict) -> None:
     job_doc = get_job(job_id, user_id=user_id) or {}
     cached_words = job_doc.get("transcriptWords")
     if cached_words and isinstance(cached_words, list) and cached_words:
+        words = cap._sanitize_words(cached_words)
         progress(
             job_id, pct=80,
-            message=f"Using cached transcript ({len(cached_words)} words)…",
+            message=f"Using cached transcript ({len(words)} words)…",
         )
-        words = cached_words
+        if words and words != cached_words:
+            update_job(job_id, transcriptWords=words)
     else:
         try:
             api_key = get_gemini_key(user_id, user_plan=params.get("userPlan") or "")
@@ -145,6 +147,7 @@ def handle(job_id: str, user_id: str, params: dict) -> None:
         words = cap.transcribe_words(
             client, audio_path,
             job_id=job_id, progress_lo=15, progress_hi=85,
+            language=params.get("language"),
         )
         if not words:
             raise RuntimeError(

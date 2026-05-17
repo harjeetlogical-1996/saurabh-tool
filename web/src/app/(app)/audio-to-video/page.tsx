@@ -1671,9 +1671,8 @@ function StopIcon() {
 // 18 styles matching backend STYLE_PRESETS. Each gets a category for
 // the tab filter UI and a label.
 type CaptionStyle =
-  // Original 8
+  // Original 7 (Bold removed 2026-05)
   | "plain"
-  | "bold"
   | "highlight"
   | "karaoke"
   | "outline"
@@ -1711,8 +1710,7 @@ const CAPTION_STYLES: Array<{
   { v: "tiktok",    label: "TikTok",    category: "trendy" },
   { v: "neon",      label: "Neon",      category: "trendy" },
   { v: "highlight", label: "Highlight", category: "trendy" },
-  // Bold
-  { v: "bold",      label: "Bold",      category: "bold" },
+  // Bold / impact (Bold style removed 2026-05; category kept for grouping)
   { v: "karaoke",   label: "Karaoke",   category: "bold" },
   { v: "outline",   label: "Outline",   category: "bold" },
   { v: "gradient",  label: "Gradient",  category: "bold" },
@@ -2156,7 +2154,6 @@ function CaptionOverlay({
   };
   const SPACING: Record<CaptionStyle, StyleSpacing> = {
     plain:      { padX: compact ? "0.45em" : "0.6em", padY: compact ? "0.15em" : "0.22em", marginX: "0" },
-    bold:       { padX: "0",                          padY: "0",                            marginX: compact ? "0.2em" : "0.4em" },
     highlight:  { padX: compact ? "0.45em" : "0.7em", padY: compact ? "0.18em" : "0.28em", marginX: "0" },
     karaoke:    { padX: "0",                          padY: "0",                            marginX: "0" },
     outline:    { padX: "0",                          padY: "0",                            marginX: compact ? "0.3em" : "0.5em" },
@@ -2186,7 +2183,7 @@ function CaptionOverlay({
       : "inherit";
 
   const baseText = phrases[safeIdx] ?? "";
-  const text = style === "bold" ? baseText.toUpperCase() : baseText;
+  const text = baseText;
 
   // If the user touched ANY Customize knob, render the phrase with
   // those effective values directly — matches what the backend burn
@@ -2251,30 +2248,15 @@ function CaptionOverlay({
         {text}
       </span>
     );
-  } else if (style === "bold") {
-    captionEl = (
-      <span
-        className="inline-block font-extrabold leading-tight tracking-wide"
-        style={{
-          color: "#FFFFFF",
-          fontSize: sizePx,
-          margin: `0 ${spacing.marginX}`,
-          paintOrder: "stroke fill",
-          WebkitTextStroke: `${heavyOutline} #000`,
-          textShadow:
-            "0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000",
-        }}
-      >
-        {text}
-      </span>
-    );
   } else if (style === "highlight") {
     captionEl = (
       <span
-        className="inline-block rounded font-semibold leading-tight"
+        className="inline-block rounded font-bold leading-tight"
         style={{
-          background: "var(--accent)",
-          color: "#0a0a0a",
+          background: "#00F0FF",
+          color: "#FFFFFF",
+          paintOrder: "stroke fill",
+          WebkitTextStroke: "1px #000",
           fontSize: sizePx,
           padding: `${spacing.padY} ${spacing.padX}`,
           fontFamily: presetFontFamily,
@@ -2463,13 +2445,12 @@ function CaptionOverlay({
   } else if (style === "underline") {
     captionEl = (
       <span
-        className="inline-block font-semibold leading-tight"
+        className="inline-block font-extrabold leading-tight tracking-wide"
         style={{
           color: "#FFFFFF",
           fontSize: sizePx,
-          padding: "0.12em 0.55em",
-          background:
-            "linear-gradient(to top, rgba(0,240,255,0.65) 0%, rgba(0,240,255,0.65) 22%, transparent 22%)",
+          paintOrder: "stroke fill",
+          WebkitTextStroke: `${compact ? "1.4px" : "2.5px"} #00F0FF`,
         }}
       >
         {text}
@@ -2484,9 +2465,8 @@ function CaptionOverlay({
           color: "#FFF1D0",
           fontSize: sizePx,
           padding: "0.25em 0.85em",
+          // ASS has no rounded corners — keep this square to match.
           border: "3px solid #FFF",
-          borderRadius: "999px",
-          boxShadow: "0 3px 0 rgba(0,0,0,0.45), 0 6px 14px rgba(0,0,0,0.4)",
         }}
       >
         {text}
@@ -2524,7 +2504,7 @@ function CaptionOverlay({
           paintOrder: "stroke fill",
           WebkitTextStroke: `${compact ? "1.6px" : "3px"} #B30000`,
           textShadow:
-            "0 0 10px rgba(255,193,7,0.65), 0 0 18px rgba(179,0,0,0.5)",
+            "3px 3px 0 rgba(179,0,0,0.7)",
           letterSpacing: "0.06em",
         }}
       >
@@ -2659,13 +2639,12 @@ function CaptionsPanel({
   const captionsActiveOnParent = !!parentJob.activeCaptionsJobId;
   const activeStyle = parentJob.activeCaptionsStyle as
     | "plain"
-    | "bold"
     | "highlight"
     | "karaoke"
     | null;
   // In modal mode, default the picker to open so we don't double-gate.
   const [open, setOpen] = useState(hideHeader);
-  const [style, setStyle] = useState<CaptionStyle>("bold");
+  const [style, setStyle] = useState<CaptionStyle>("plain");
   const [position, setPosition] = useState<"top" | "middle" | "bottom">("bottom");
   const [wordsPerLine, setWordsPerLine] = useState(2);
   const [submitting, setSubmitting] = useState(false);
@@ -2734,7 +2713,7 @@ function CaptionsPanel({
       onPreviewChange({
         style: activeStyle as CaptionStyle,
         position: "bottom",
-        wordsPerLine: 2,
+        wordsPerLine: 3,
       });
     } else {
       onPreviewChange(null);

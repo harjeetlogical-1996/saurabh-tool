@@ -25,6 +25,7 @@ type Tool = {
 const TOOLS: Tool[] = [
   { href: "/audio-to-video", label: "Audio to Video", status: "live" },
   { href: "/captions", label: "Caption your videos", status: "live" },
+  { href: "/voice-pair", label: "Voice Pair", status: "live" },
 ];
 
 type SettingsItem = { href: string; label: string; byoOnly?: boolean };

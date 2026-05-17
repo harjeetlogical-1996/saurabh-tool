@@ -18,6 +18,7 @@ Cookie name: f"{AUTH_COOKIE_PREFIX}.session_token"
 from __future__ import annotations
 
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -46,6 +47,7 @@ from tools import (  # noqa: E402
     bulk_captions,
     bulk_captions_render,
     captions,
+    voice_pair,
 )
 
 ROOT = Path(__file__).parent
@@ -86,6 +88,7 @@ async def lifespan(_app: FastAPI):
     jobs.register_handler("captions", captions.handle)
     jobs.register_handler("bulk-captions", bulk_captions.handle)
     jobs.register_handler("bulk-captions-render", bulk_captions_render.handle)
+    jobs.register_handler("voice-pair", voice_pair.handle)
     jobs.start_worker_thread()
     yield
 
@@ -338,9 +341,51 @@ ALLOWED_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
 MAX_AUDIO_BYTES = 50 * 1024 * 1024
 MAX_BULK_FILES = 50
 
+
+def _make_project(
+    name: Optional[str],
+    *,
+    user_id: Optional[str] = None,
+    existing_project_id: Optional[str] = None,
+) -> tuple[str, str]:
+    """Generate (projectId, projectName) for a submit.
+
+    Modes:
+      - existing_project_id supplied: look up the project's existing
+        name on any prior job belonging to this user and reuse both,
+        so new uploads merge into the same group.
+      - name supplied: create a NEW project with that name.
+      - neither: create a new project with a "Project · <date>" name.
+    """
+    if existing_project_id and user_id:
+        # Pull the project name from any of this user's jobs that
+        # already carry this projectId. If no match, treat as new.
+        doc = db().tool_jobs.find_one(
+            {"userId": user_id, "projectId": existing_project_id},
+            {"projectName": 1},
+        )
+        if doc and doc.get("projectName"):
+            return existing_project_id, str(doc["projectName"])
+        # Fell through (invalid id from client) — fall through to new project.
+    project_id = str(uuid.uuid4())
+    if name and name.strip():
+        clean_name = name.strip()[:80]
+    else:
+        # Local-ish date+time so the user sees their timezone in the UI.
+        # Mongo timestamps are still UTC; this is just a label.
+        now = datetime.now(timezone.utc).astimezone()
+        clean_name = f"Project · {now.strftime('%b %d, %I:%M %p')}"
+    return project_id, clean_name
+
 # Bulk caption tool: accepts already-edited videos.
 ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
 MAX_VIDEO_BYTES = 200 * 1024 * 1024  # 200 MB per video — most reels are <50 MB
+
+# Voice Pair tool: image OR video on the media side, audio on the voice side.
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+MAX_IMAGE_BYTES = 25 * 1024 * 1024
+# Reuse audio + video constants above for the rest. Pair upload caps at
+# MAX_BULK_FILES per request (50), same as a2v.
 
 
 # Languages we explicitly support for the scene-planning prompt hint.
@@ -433,6 +478,8 @@ async def submit_audio_to_video(
     segment_seconds: str = Form("auto"),
     animation_style: str = Form("ken_burns"),
     audio_language: str = Form("auto"),
+    projectName: str = Form(""),
+    projectId: str = Form(""),
     user: AuthUser = Depends(current_user),
 ):
     """
@@ -479,6 +526,12 @@ async def submit_audio_to_video(
     blocked: list[dict] = []
     rejected: list[dict] = []
 
+    # Group all jobs in this submit under a single project for the UI.
+    # If projectId is supplied, append to that existing project.
+    project_id, project_name = _make_project(
+        projectName, user_id=user.id, existing_project_id=projectId or None,
+    )
+
     for idx, file in enumerate(audio):
         # Save first so blocked jobs still have the audio on disk.
         try:
@@ -508,7 +561,10 @@ async def submit_audio_to_video(
         cost_sec = int(round(duration_sec))
 
         if unlimited or remaining_sec >= cost_sec:
-            jid = jobs.create_job(user_id=user.id, tool="audio-to-video", params=params)
+            jid = jobs.create_job(
+                user_id=user.id, tool="audio-to-video", params=params,
+                project_id=project_id, project_name=project_name,
+            )
             jobs.enqueue(jid, user.id)
             if not unlimited:
                 remaining_sec -= cost_sec
@@ -524,6 +580,8 @@ async def submit_audio_to_video(
                     f"Needs {cost_sec}s but only {remaining_sec}s left this cycle. "
                     "Upgrade your plan or buy a top-up to render this video."
                 ),
+                project_id=project_id,
+                project_name=project_name,
             )
             doc = jobs.get_job(jid, user_id=user.id)
             if doc:
@@ -539,6 +597,8 @@ async def submit_audio_to_video(
             "blocked": len(blocked),
             "rejected": len(rejected),
         },
+        "projectId": project_id,
+        "projectName": project_name,
     }
 
 
@@ -681,6 +741,14 @@ def _normalize_caption_options(
 @app.post("/me/jobs/captions-bulk")
 async def submit_bulk_captions(
     video: list[UploadFile] = File(...),
+    projectName: str = Form(""),
+    # Pass an existing projectId to add these videos to that project
+    # instead of creating a new one. Otherwise a new project is created.
+    projectId: str = Form(""),
+    # Optional language hint for the transcriber. Hindi/Urdu are
+    # phonetically close enough that Whisper's auto-detect frequently
+    # flips between them on short clips. "auto" lets the engine choose.
+    language: str = Form("auto"),
     user: AuthUser = Depends(current_user),
 ):
     """
@@ -720,6 +788,13 @@ async def submit_bulk_captions(
     blocked: list[dict] = []
     rejected: list[dict] = []
 
+    # Group all jobs in this submit under a single project for the UI.
+    # If projectId is supplied AND matches one of the user's existing
+    # projects, append to that project instead of creating a new one.
+    project_id, project_name = _make_project(
+        projectName, user_id=user.id, existing_project_id=projectId or None,
+    )
+
     for file in video:
         try:
             video_path, size_bytes = await _save_video_upload(user.id, file)
@@ -733,9 +808,13 @@ async def submit_bulk_captions(
             "videoBytes": size_bytes,
             "label": file.filename or "Video",
             "userPlan": user.plan,
+            "language": (language or "auto").lower(),
         }
         if has_budget:
-            jid = jobs.create_job(user_id=user.id, tool="bulk-captions", params=params)
+            jid = jobs.create_job(
+                user_id=user.id, tool="bulk-captions", params=params,
+                project_id=project_id, project_name=project_name,
+            )
             jobs.enqueue(jid, user.id)
             doc = jobs.get_job(jid, user_id=user.id)
             if doc:
@@ -746,6 +825,8 @@ async def submit_bulk_captions(
                 tool="bulk-captions",
                 params=params,
                 reason="Out of minutes this cycle. Upgrade or buy a top-up.",
+                project_id=project_id,
+                project_name=project_name,
             )
             doc = jobs.get_job(jid, user_id=user.id)
             if doc:
@@ -761,6 +842,8 @@ async def submit_bulk_captions(
             "blocked": len(blocked),
             "rejected": len(rejected),
         },
+        "projectId": project_id,
+        "projectName": project_name,
     }
 
 
@@ -1200,6 +1283,218 @@ def clear_active_captions(job_id: str, user: AuthUser = Depends(current_user)):
     return {"ok": True}
 
 
+async def _save_image_upload(user_id: str, image: UploadFile) -> tuple[Path, int]:
+    """Stream an image upload to a per-job folder. Returns (path, bytes)."""
+    if not image.filename:
+        raise HTTPException(status_code=400, detail="No file uploaded.")
+    ext = (Path(image.filename).suffix or ".jpg").lower()
+    if ext not in ALLOWED_IMAGE_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{image.filename}: unsupported image format ({ext}). Use jpg, png, or webp.",
+        )
+    job_uuid = str(uuid.uuid4())
+    job_dir = UPLOAD_DIR / user_id / job_uuid
+    job_dir.mkdir(parents=True, exist_ok=True)
+    img_path = job_dir / f"input{ext}"
+
+    size_bytes = 0
+    with img_path.open("wb") as f:
+        while True:
+            chunk = await image.read(1024 * 1024)
+            if not chunk:
+                break
+            size_bytes += len(chunk)
+            if size_bytes > MAX_IMAGE_BYTES:
+                f.close()
+                img_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"{image.filename}: file too large (25 MB max).",
+                )
+            f.write(chunk)
+    return img_path, size_bytes
+
+
+@app.post("/me/jobs/voice-pair")
+async def submit_voice_pair(
+    # Flat list of all media files across all pairs. The frontend groups
+    # them per pair using `mediaCounts`: mediaCounts[i] = how many media
+    # files belong to pair i, in order. Pair i also has voice[i] and
+    # animations[i].
+    media: list[UploadFile] = File(...),
+    voice: list[UploadFile] = File(...),
+    mediaCounts: list[str] = Form(default=[]),
+    mode: str = Form("single"),
+    animations: list[str] = Form(default=[]),
+    label: str = Form(""),
+    projectName: str = Form(""),
+    projectId: str = Form(""),
+    user: AuthUser = Depends(current_user),
+):
+    """
+    Bulk submit for the Voice Pair tool. Two modes:
+      - mode="single":     each media file pairs with one voice file
+                           (mediaCounts = [1, 1, 1, ...] implicitly).
+      - mode="slideshow":  each pair takes N media files + 1 voice,
+                           where N is given by mediaCounts[i]. Sum of
+                           mediaCounts must equal len(media).
+
+    `voice` length always equals the number of PAIRS — one voice per
+    pair regardless of how many media files that pair has.
+
+    Free tool — no billing/minute check.
+    """
+    mode = (mode or "single").lower()
+    if mode not in {"single", "slideshow"}:
+        raise HTTPException(status_code=400, detail=f"Unknown mode: {mode}")
+
+    if not media or not voice:
+        raise HTTPException(status_code=400, detail="Upload at least one media + voice pair.")
+
+    # Resolve mediaCounts: in single mode default is [1, 1, ...].
+    if not mediaCounts:
+        counts = [1] * len(voice)
+    else:
+        try:
+            counts = [int(c) for c in mediaCounts]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="mediaCounts must be integers.")
+
+    if len(counts) != len(voice):
+        raise HTTPException(
+            status_code=400,
+            detail=f"mediaCounts length ({len(counts)}) must equal voice count ({len(voice)}).",
+        )
+    if sum(counts) != len(media):
+        raise HTTPException(
+            status_code=400,
+            detail=f"mediaCounts sum ({sum(counts)}) must equal total media count ({len(media)}).",
+        )
+    if len(voice) > MAX_BULK_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many pairs in one submit ({len(voice)} > {MAX_BULK_FILES}).",
+        )
+
+    queued: list[dict] = []
+    rejected: list[dict] = []
+
+    # Group every job in this submit under a single project so the UI
+    # can show them nested. Default name = timestamp if user didn't type.
+    # projectId merges into that existing project when supplied.
+    project_id, project_name = _make_project(
+        projectName, user_id=user.id, existing_project_id=projectId or None,
+    )
+
+    # Random offset so a single-image submit doesn't always get the
+    # same animation variant (m=0, centered zoom). The pair_idx is
+    # still added on top, so a slideshow gets sequential variety.
+    import random as _random
+    anim_seed_offset = _random.randint(0, 7)
+
+    # Walk media list in chunks defined by counts[i].
+    media_idx = 0
+    for pair_idx, v_file in enumerate(voice):
+        v_name = v_file.filename or f"voice-{pair_idx}"
+        count = counts[pair_idx]
+        pair_media: list[tuple[Path, str]] = []  # (saved_path, original_name)
+        pair_rejected = False
+
+        for _ in range(count):
+            m_file = media[media_idx]
+            media_idx += 1
+            m_name = m_file.filename or f"media-{pair_idx}"
+            try:
+                m_ext = (Path(m_name).suffix or "").lower()
+                if m_ext in ALLOWED_IMAGE_EXTS:
+                    saved, _m_bytes = await _save_image_upload(user.id, m_file)
+                elif m_ext in ALLOWED_VIDEO_EXTS:
+                    saved, _m_bytes = await _save_video_upload(user.id, m_file)
+                else:
+                    rejected.append({
+                        "filename": m_name,
+                        "reason": f"Unsupported media format: {m_ext}. Use image (jpg/png/webp) or video (mp4/mov/webm).",
+                    })
+                    pair_rejected = True
+                    continue
+                pair_media.append((saved, m_name))
+            except HTTPException as e:
+                rejected.append({"filename": m_name, "reason": e.detail})
+                pair_rejected = True
+
+        if pair_rejected or not pair_media:
+            continue
+
+        try:
+            voice_path, _v_bytes = await _save_audio_upload(user.id, v_file)
+        except HTTPException as e:
+            rejected.append({"filename": v_name, "reason": e.detail})
+            continue
+
+        animation = "static"
+        if pair_idx < len(animations):
+            a = (animations[pair_idx] or "").strip().lower()
+            if a in {"static", "ken_burns"}:
+                animation = a
+
+        voice_dur = audio_duration_seconds(voice_path)
+
+        if mode == "slideshow" or len(pair_media) > 1:
+            params = {
+                "mode": "slideshow",
+                "mediaPaths": [str(p) for p, _ in pair_media],
+                "mediaFilenames": [n for _, n in pair_media],
+                "voicePath": str(voice_path),
+                "voiceFilename": v_name,
+                "pairIndex": pair_idx + anim_seed_offset,
+                "voiceDurationSec": voice_dur,
+                "label": label[:80] if label else "",
+                "userPlan": user.plan,
+            }
+            display_name = f"Slideshow · {len(pair_media)} items"
+        else:
+            saved, m_name = pair_media[0]
+            params = {
+                "mode": "single",
+                "mediaPath": str(saved),
+                "mediaFilename": m_name,
+                "voicePath": str(voice_path),
+                "voiceFilename": v_name,
+                "animation": animation,
+                "pairIndex": pair_idx + anim_seed_offset,
+                "voiceDurationSec": voice_dur,
+                "label": label[:80] if label else "",
+                "userPlan": user.plan,
+            }
+            display_name = m_name
+
+        job_id = jobs.create_job(
+            user_id=user.id,
+            tool="voice-pair",
+            params=params,
+            project_id=project_id,
+            project_name=project_name,
+        )
+        jobs.enqueue(job_id, user.id)
+        queued.append({
+            "id": job_id,
+            "filename": display_name,
+            "voiceFilename": v_name,
+            "voiceDurationSec": voice_dur,
+            "animation": animation,
+            "mode": params["mode"],
+        })
+
+    return {
+        "queued": queued,
+        "rejected": rejected,
+        "summary": {"queued": len(queued), "rejected": len(rejected)},
+        "projectId": project_id,
+        "projectName": project_name,
+    }
+
+
 @app.get("/me/jobs")
 def list_my_jobs(
     status: Optional[str] = None,
@@ -1256,6 +1551,271 @@ def cancel_job(job_id: str, user: AuthUser = Depends(current_user)):
         raise HTTPException(status_code=404, detail="Job not found.")
     res = jobs.request_cancel(job_id, user_id=user.id)
     return res
+
+
+@app.delete("/me/jobs/{job_id}")
+def delete_job(job_id: str, user: AuthUser = Depends(current_user)):
+    """
+    Permanently remove a finished job (done/failed/cancelled) from the
+    user's history. Running jobs are cancelled first, then deleted.
+    Also wipes the rendered output file + any auxiliary files on disk.
+    """
+    doc = jobs.get_job(job_id, user_id=user.id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    # If the job is still active, cancel it first so the worker stops
+    # writing to the file we're about to delete.
+    if doc.get("status") in ("queued", "running"):
+        jobs.request_cancel(job_id, user_id=user.id)
+
+    files_removed = 0
+    # Delete the main output and any sidecar paths we know about.
+    for key in ("outputPath", "srtPath"):
+        p = doc.get(key)
+        if p:
+            try:
+                fp = Path(p)
+                if fp.exists() and fp.is_file():
+                    fp.unlink()
+                    files_removed += 1
+            except OSError:
+                pass
+    # Also remove the source uploads if no other job references them.
+    params = doc.get("params") or {}
+    candidate_paths: list[str] = []
+    for key in ("audioPath", "videoPath", "mediaPath", "voicePath"):
+        if params.get(key):
+            candidate_paths.append(params[key])
+    if isinstance(params.get("mediaPaths"), list):
+        candidate_paths.extend(str(p) for p in params["mediaPaths"])
+    for p in candidate_paths:
+        try:
+            fp = Path(p)
+            if fp.exists() and fp.is_file():
+                fp.unlink()
+                files_removed += 1
+        except OSError:
+            pass
+
+    from bson import ObjectId as _OID
+    db().tool_jobs.delete_one({"_id": _OID(job_id), "userId": user.id})
+    return {"ok": True, "filesRemoved": files_removed}
+
+
+# ---- Projects ---------------------------------------------------------
+# Projects are just a (projectId, projectName) pair stamped on each
+# job at submit time. Listing/renaming/deleting projects is implemented
+# as a grouped read / multi-update / multi-delete over tool_jobs — no
+# separate `projects` collection. Keeps the data model simple and lets
+# old jobs (without projectId) coexist with new ones.
+
+@app.get("/me/projects")
+def list_my_projects(
+    limit: int = 50,
+    user: AuthUser = Depends(current_user),
+):
+    """List the user's projects, newest-first. Each entry summarises
+    the project's jobs: counts by status, dominant tool, total bytes.
+    Jobs without a projectId are bucketed under "(Unfiled)" so the UI
+    can still surface legacy renders."""
+    pipeline = [
+        {"$match": {"userId": user.id}},
+        {"$sort": {"createdAt": -1}},
+        {
+            "$group": {
+                "_id": {"$ifNull": ["$projectId", None]},
+                "projectName": {"$first": "$projectName"},
+                "createdAt": {"$max": "$createdAt"},
+                "updatedAt": {"$max": "$updatedAt"},
+                "jobCount": {"$sum": 1},
+                "doneCount": {
+                    "$sum": {"$cond": [{"$eq": ["$status", "done"]}, 1, 0]},
+                },
+                "runningCount": {
+                    "$sum": {
+                        "$cond": [
+                            {"$in": ["$status", ["queued", "running"]]}, 1, 0,
+                        ],
+                    },
+                },
+                "failedCount": {
+                    "$sum": {
+                        "$cond": [
+                            {"$in": ["$status", ["failed", "cancelled"]]}, 1, 0,
+                        ],
+                    },
+                },
+                "tools": {"$addToSet": "$tool"},
+            },
+        },
+        {"$sort": {"updatedAt": -1}},
+        {"$limit": max(1, min(200, int(limit)))},
+    ]
+    items: list[dict] = []
+    for row in db().tool_jobs.aggregate(pipeline):
+        pid = row["_id"]
+        items.append({
+            "projectId": pid,
+            "projectName": row.get("projectName") or (
+                "(Unfiled)" if not pid else "Untitled project"
+            ),
+            "jobCount": row.get("jobCount", 0),
+            "doneCount": row.get("doneCount", 0),
+            "runningCount": row.get("runningCount", 0),
+            "failedCount": row.get("failedCount", 0),
+            "tools": row.get("tools") or [],
+            "createdAt": row.get("createdAt").isoformat() if row.get("createdAt") else None,
+            "updatedAt": row.get("updatedAt").isoformat() if row.get("updatedAt") else None,
+        })
+    return {"items": items}
+
+
+@app.get("/me/projects/{project_id}/jobs")
+def list_project_jobs(
+    project_id: str,
+    user: AuthUser = Depends(current_user),
+):
+    """Newest-first list of jobs in a single project."""
+    cur = db().tool_jobs.find({
+        "userId": user.id,
+        "projectId": project_id,
+    }).sort("createdAt", -1)
+    return {"items": [jobs.serialize_job(d) for d in cur]}
+
+
+@app.post("/me/projects/{project_id}/rename")
+def rename_project(
+    project_id: str,
+    body: dict,
+    user: AuthUser = Depends(current_user),
+):
+    """Rename a project. Updates every job that carries this projectId."""
+    new_name = str(body.get("name") or "").strip()[:80]
+    if not new_name:
+        raise HTTPException(status_code=400, detail="name is required")
+    res = db().tool_jobs.update_many(
+        {"userId": user.id, "projectId": project_id},
+        {"$set": {"projectName": new_name, "updatedAt": datetime.now(timezone.utc)}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return {"ok": True, "renamed": res.modified_count, "name": new_name}
+
+
+@app.delete("/me/projects/{project_id}")
+def delete_project(
+    project_id: str,
+    user: AuthUser = Depends(current_user),
+):
+    """Cascade-delete a project: cancel any in-flight jobs, then remove
+    every job document + its rendered + source files on disk."""
+    docs = list(db().tool_jobs.find({
+        "userId": user.id,
+        "projectId": project_id,
+    }))
+    if not docs:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    files_removed = 0
+    jobs_removed = 0
+    for doc in docs:
+        # Cancel running first so the worker stops writing.
+        if doc.get("status") in ("queued", "running"):
+            try:
+                jobs.request_cancel(str(doc["_id"]), user_id=user.id)
+            except Exception:
+                pass
+        for key in ("outputPath", "srtPath"):
+            p = doc.get(key)
+            if p:
+                try:
+                    fp = Path(p)
+                    if fp.exists() and fp.is_file():
+                        fp.unlink()
+                        files_removed += 1
+                except OSError:
+                    pass
+        params = doc.get("params") or {}
+        candidates: list[str] = []
+        for key in ("audioPath", "videoPath", "mediaPath", "voicePath"):
+            if params.get(key):
+                candidates.append(params[key])
+        if isinstance(params.get("mediaPaths"), list):
+            candidates.extend(str(p) for p in params["mediaPaths"])
+        for p in candidates:
+            try:
+                fp = Path(p)
+                if fp.exists() and fp.is_file():
+                    fp.unlink()
+                    files_removed += 1
+            except OSError:
+                pass
+        jobs_removed += 1
+
+    db().tool_jobs.delete_many({"userId": user.id, "projectId": project_id})
+    return {"ok": True, "jobsRemoved": jobs_removed, "filesRemoved": files_removed}
+
+
+@app.get("/me/projects/{project_id}/zip")
+def download_project_zip(
+    project_id: str,
+    user: AuthUser = Depends(current_user),
+):
+    """Bundle every DONE job's output mp4 in this project as a single
+    ZIP. Streams the zip so we don't hold the whole archive in RAM."""
+    import io
+    import zipfile
+    from fastapi.responses import StreamingResponse
+
+    docs = list(db().tool_jobs.find({
+        "userId": user.id,
+        "projectId": project_id,
+        "status": "done",
+    }))
+    if not docs:
+        raise HTTPException(
+            status_code=404,
+            detail="No completed renders in this project yet.",
+        )
+
+    project_name = docs[0].get("projectName") or "project"
+    safe_name = re.sub(r"[^\w\-]+", "_", project_name).strip("_") or "project"
+
+    # In-memory zip. For large projects (~100 mp4s) we'd want a temp
+    # file, but for typical 5-20 file submits this is fine and lets us
+    # stream the response without writing intermediate disk state.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        for doc in docs:
+            out_path = doc.get("outputPath")
+            if not out_path:
+                continue
+            fp = Path(out_path)
+            if not fp.exists():
+                continue
+            # Pick a friendly arcname: prefer the source filename if known.
+            params = doc.get("params") or {}
+            base = (
+                params.get("audioFilename")
+                or params.get("videoFilename")
+                or params.get("mediaFilename")
+                or fp.name
+            )
+            arcname = f"{Path(base).stem}{fp.suffix}"
+            # Avoid duplicate names by suffixing with the job id tail.
+            arcname = f"{Path(base).stem}_{str(doc['_id'])[-6:]}{fp.suffix}"
+            zf.write(str(fp), arcname=arcname)
+    buf.seek(0)
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{safe_name}.zip"',
+    }
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/zip",
+        headers=headers,
+    )
 
 
 @app.post("/me/jobs/{job_id}/retry")

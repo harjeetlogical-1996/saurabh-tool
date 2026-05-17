@@ -226,6 +226,9 @@ export type Job = {
     pollinationsIndices: number[];
     placeholderIndices: number[];
   } | null;
+  /** Project grouping. New jobs always have these; legacy jobs may not. */
+  projectId: string | null;
+  projectName: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -330,6 +333,53 @@ export const apiClient = {
       body: fd,
     });
   },
+  /** Voice Pair. Two modes:
+   *  - "single": each pair has 1 media + 1 voice
+   *  - "slideshow": each pair has N media files + 1 voice; the media
+   *    play back-to-back filling the voice's duration in equal slices.
+   *  Pair shape is the same in both modes — caller passes media as an
+   *  array of files per pair. */
+  submitVoicePair: (
+    pairs: {
+      media: File[];
+      voice: File;
+      animation: "static" | "ken_burns";
+    }[],
+    opts: {
+      label?: string;
+      mode?: "single" | "slideshow";
+      projectName?: string;
+      projectId?: string;
+    } = {},
+  ) => {
+    const fd = new FormData();
+    const counts: number[] = [];
+    for (const p of pairs) {
+      counts.push(p.media.length);
+      for (const m of p.media) fd.append("media", m);
+      fd.append("voice", p.voice);
+      fd.append("animations", p.animation);
+    }
+    for (const c of counts) fd.append("mediaCounts", String(c));
+    fd.append("mode", opts.mode ?? "single");
+    if (opts.label) fd.append("label", opts.label);
+    if (opts.projectName) fd.append("projectName", opts.projectName);
+    if (opts.projectId) fd.append("projectId", opts.projectId);
+    return api<{
+      queued: {
+        id: string;
+        filename: string;
+        voiceFilename: string;
+        voiceDurationSec: number;
+        animation: string;
+        mode: string;
+      }[];
+      rejected: { filename: string; reason: string }[];
+      summary: { queued: number; rejected: number };
+      projectId: string;
+      projectName: string;
+    }>("/me/jobs/voice-pair", { method: "POST", body: fd });
+  },
   listJobs: (params?: { status?: string; limit?: number }) => {
     const qs = new URLSearchParams();
     if (params?.status) qs.set("status", params.status);
@@ -348,6 +398,49 @@ export const apiClient = {
       reason?: string;
       status?: string;
     }>(`/me/jobs/${jobId}/cancel`, { method: "POST" }),
+  deleteJob: (jobId: string) =>
+    api<{ ok: boolean; filesRemoved?: number }>(`/me/jobs/${jobId}`, {
+      method: "DELETE",
+    }),
+  // Projects: a (projectId, projectName) pair stamped on each job at
+  // submit time. The frontend uses these to fold related renders into
+  // a single collapsible card with bulk actions.
+  listProjects: (params?: { limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.limit) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return api<{
+      items: {
+        projectId: string | null;
+        projectName: string;
+        jobCount: number;
+        doneCount: number;
+        runningCount: number;
+        failedCount: number;
+        tools: string[];
+        createdAt: string | null;
+        updatedAt: string | null;
+      }[];
+    }>(`/me/projects${suffix}`);
+  },
+  listProjectJobs: (projectId: string) =>
+    api<{ items: Job[] }>(`/me/projects/${projectId}/jobs`),
+  renameProject: (projectId: string, name: string) =>
+    api<{ ok: boolean; renamed: number; name: string }>(
+      `/me/projects/${projectId}/rename`,
+      { method: "POST", body: { name } },
+    ),
+  deleteProject: (projectId: string) =>
+    api<{ ok: boolean; jobsRemoved: number; filesRemoved: number }>(
+      `/me/projects/${projectId}`,
+      { method: "DELETE" },
+    ),
+  projectZipUrl: (projectId: string) => {
+    const url = new URL(BASE + `/me/projects/${projectId}/zip`);
+    const devId = getDevUserId();
+    if (devId) url.searchParams.set("dev_user_id", devId);
+    return url.toString();
+  },
   retryJob: (jobId: string) =>
     api<{ ok: boolean; wasStatus: string }>(`/me/jobs/${jobId}/retry`, {
       method: "POST",
@@ -369,13 +462,19 @@ export const apiClient = {
    * transcribe-only jobs. The user then opens each transcribed clip in
    * the editor to choose a style and trigger `submitCaptionsRender`.
    */
-  submitBulkCaptions: (files: File[]) => {
+  submitBulkCaptions: (
+    files: File[],
+    opts: { projectName?: string; projectId?: string; language?: string } = {},
+  ) => {
     const fd = new FormData();
     for (const f of files) fd.append("video", f);
-    return api<SubmitResult>("/me/jobs/captions-bulk", {
-      method: "POST",
-      body: fd,
-    });
+    if (opts.projectName) fd.append("projectName", opts.projectName);
+    if (opts.projectId) fd.append("projectId", opts.projectId);
+    if (opts.language) fd.append("language", opts.language);
+    return api<SubmitResult & { projectId?: string; projectName?: string }>(
+      "/me/jobs/captions-bulk",
+      { method: "POST", body: fd },
+    );
   },
   /** Stage 2: burn captions onto a transcribed video. */
   submitCaptionsRender: (

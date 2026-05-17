@@ -22,9 +22,8 @@ const MAX_FILES = 50;
 const POLL_MS = 1500;
 
 type CaptionStyle =
-  // Original 8
+  // Original 7 (Bold removed 2026-05)
   | "plain"
-  | "bold"
   | "highlight"
   | "karaoke"
   | "outline"
@@ -66,8 +65,7 @@ const CAPTION_STYLES: Array<{
   { v: "neon", label: "Neon", category: "trendy" },
   { v: "highlight", label: "Highlight", category: "trendy" },
 
-  // Bold / impact
-  { v: "bold", label: "Bold", category: "bold" },
+  // Bold / impact (Bold style removed 2026-05; category name kept for grouping)
   { v: "karaoke", label: "Karaoke", category: "bold" },
   { v: "outline", label: "Outline", category: "bold" },
   { v: "gradient", label: "Gradient", category: "bold" },
@@ -117,6 +115,18 @@ export default function BulkCaptionsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitNotice, setSubmitNotice] = useState<string | null>(null);
+  // Optional project name for grouped Recent renders. Cleared on success.
+  const [projectName, setProjectName] = useState("");
+  // When set, new uploads merge into that existing project instead of
+  // creating a new one. Empty string = "New project" (use projectName).
+  const [pickedProjectId, setPickedProjectId] = useState("");
+  // Existing projects available to add to — populated from listProjects.
+  const [existingProjects, setExistingProjects] = useState<
+    { projectId: string; projectName: string; jobCount: number }[]
+  >([]);
+  // Language hint for the transcriber. "auto" = let it detect, but
+  // Hindi/Urdu users will want to pin to avoid script flips.
+  const [language, setLanguage] = useState<"auto" | "hi" | "en" | "ur">("auto");
   const inputRef = useRef<HTMLInputElement>(null);
 
   // All this user's bulk-captions transcribe jobs + their render children.
@@ -150,6 +160,33 @@ export default function BulkCaptionsPage() {
     }
   }, [ready]);
 
+  // Project list for the "Add to existing project" picker. Refreshed
+  // on mount + whenever a submit succeeds (since a new project may
+  // have appeared). Filtered to projects that already contain
+  // bulk-captions jobs so the dropdown isn't polluted with voice-pair
+  // or audio-to-video projects.
+  const refreshProjects = useCallback(async () => {
+    if (!ready) return;
+    try {
+      const res = await apiClient.listProjects({ limit: 50 });
+      setExistingProjects(
+        res.items
+          .filter((p) => p.projectId && p.tools.includes("bulk-captions"))
+          .map((p) => ({
+            projectId: p.projectId!,
+            projectName: p.projectName,
+            jobCount: p.jobCount,
+          })),
+      );
+    } catch {
+      /* ignore — auth in flux */
+    }
+  }, [ready]);
+
+  useEffect(() => {
+    refreshProjects();
+  }, [refreshProjects]);
+
   useEffect(() => {
     refreshJobs();
   }, [refreshJobs]);
@@ -182,13 +219,23 @@ export default function BulkCaptionsPage() {
     setSubmitError(null);
     setSubmitNotice(null);
     try {
-      const res = await apiClient.submitBulkCaptions(files);
+      const res = await apiClient.submitBulkCaptions(files, {
+        projectName: pickedProjectId ? undefined : projectName.trim() || undefined,
+        projectId: pickedProjectId || undefined,
+        language: language === "auto" ? undefined : language,
+      });
       setFiles([]);
       if (inputRef.current) inputRef.current.value = "";
       const parts: string[] = [];
-      if (res.summary.queued > 0) parts.push(`${res.summary.queued} transcribing`);
+      if (res.summary.queued > 0) {
+        const proj = res.projectName ? ` in "${res.projectName}"` : "";
+        parts.push(`${res.summary.queued} transcribing${proj}`);
+      }
       if (res.summary.rejected > 0) parts.push(`${res.summary.rejected} rejected`);
       setSubmitNotice(parts.join(" · ") || "Submitted.");
+      setProjectName("");
+      setPickedProjectId("");
+      await refreshProjects();
       await refreshJobs();
       await refresh();
     } catch (e) {
@@ -215,6 +262,67 @@ export default function BulkCaptionsPage() {
 
   const editingJob =
     editingId ? transcribeJobs.find((j) => j.id === editingId) ?? null : null;
+
+  /** Shared bulk-render handler. Library's group button passes the
+   *  stored `lastUsedOpts`; the Editor passes the live `opts` it has
+   *  RIGHT NOW so the user can apply unsaved tweaks. */
+  const runBulkApply = useCallback(
+    async (parentIds: string[], opts: RenderOpts) => {
+      setBulkBusy(true);
+      setBulkNotice(null);
+      setBulkError(null);
+      try {
+        const payload: CaptionRenderOpts = {
+          style: opts.style,
+          position: opts.position,
+          wordsPerLine: opts.wordsPerLine,
+          uppercase: opts.uppercase,
+        };
+        if (opts.posXFrac !== null) payload.posXFrac = opts.posXFrac;
+        if (opts.posYFrac !== null) payload.posYFrac = opts.posYFrac;
+        if (opts.primaryColor) payload.primaryColor = opts.primaryColor;
+        if (opts.outlineColor) payload.outlineColor = opts.outlineColor;
+        if (opts.outlineWidth !== null)
+          payload.outlineWidth = opts.outlineWidth;
+        if (opts.bgColor) payload.bgColor = opts.bgColor;
+        if (opts.bgAlpha !== null) payload.bgAlpha = opts.bgAlpha;
+        if (opts.fontSize !== null) payload.fontSize = opts.fontSize;
+        if (opts.fontFamily) payload.fontFamily = opts.fontFamily;
+        if (opts.shadow !== null) payload.shadow = opts.shadow;
+        const res = await apiClient.submitCaptionsRenderBulk(
+          parentIds,
+          payload,
+        );
+        const parts = [`${res.summary.queued} queued`];
+        if (res.summary.rejected > 0)
+          parts.push(`${res.summary.rejected} rejected`);
+        setBulkNotice(parts.join(" · "));
+        await refreshJobs();
+        await refresh();
+      } catch (e) {
+        setBulkError(
+          e instanceof ApiError ? e.message : "Bulk render failed.",
+        );
+      } finally {
+        setBulkBusy(false);
+      }
+    },
+    [refresh, refreshJobs],
+  );
+
+  // Other transcribed videos in the same project as the one being
+  // edited. Used to show an "Apply to all N other videos" button INSIDE
+  // the editor once the user has rendered once. Same-project means same
+  // projectId; unfiled (null) videos don't get sibling suggestions.
+  const projectSiblings = useMemo(() => {
+    if (!editingJob || !editingJob.projectId) return [];
+    return transcribeJobs.filter(
+      (j) =>
+        j.id !== editingJob.id &&
+        j.projectId === editingJob.projectId &&
+        j.status === "done",
+    );
+  }, [editingJob, transcribeJobs]);
 
   return (
     <div className="px-6 md:px-10 py-10 md:py-14 max-w-[1400px] mx-auto">
@@ -261,6 +369,11 @@ export default function BulkCaptionsPage() {
             await refreshJobs();
             await refresh();
           }}
+          projectSiblings={projectSiblings}
+          onApplyToProject={runBulkApply}
+          bulkBusy={bulkBusy}
+          bulkNotice={bulkNotice}
+          bulkError={bulkError}
         />
       )}
 
@@ -328,7 +441,52 @@ export default function BulkCaptionsPage() {
             </ul>
           )}
 
-          <div className="mt-5 flex items-center gap-3 flex-wrap">
+          {/* Project selector + language picker inline above submit.
+              Two-row layout: top row is the project picker (add to an
+              existing project OR start a new one); the project-name
+              input only renders when "New project" is selected. */}
+          <div className="mt-5 grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3">
+            <select
+              value={pickedProjectId}
+              onChange={(e) => {
+                setPickedProjectId(e.target.value);
+                // Clear typed name when switching to an existing
+                // project — that name would otherwise be ignored.
+                if (e.target.value) setProjectName("");
+              }}
+              className="bg-black/30 border border-[var(--line)] rounded px-3 py-2 text-[13px] focus:outline-none focus:border-[var(--accent)]"
+            >
+              <option value="">+ New project</option>
+              {existingProjects.map((p) => (
+                <option key={p.projectId} value={p.projectId}>
+                  {p.projectName} ({p.jobCount})
+                </option>
+              ))}
+            </select>
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value as typeof language)}
+              className="bg-black/30 border border-[var(--line)] rounded px-3 py-2 text-[13px] focus:outline-none focus:border-[var(--accent)]"
+              title="Force transcription language. Auto works for most clips."
+            >
+              <option value="auto">Language: Auto-detect</option>
+              <option value="hi">Hindi</option>
+              <option value="en">English</option>
+              <option value="ur">Urdu</option>
+            </select>
+          </div>
+          {!pickedProjectId && (
+            <input
+              type="text"
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              placeholder="New project name (optional — defaults to timestamp)"
+              maxLength={80}
+              className="mt-3 w-full bg-black/30 border border-[var(--line)] rounded px-3 py-2 text-[13px] placeholder:text-[var(--muted)]/60 focus:outline-none focus:border-[var(--accent)]"
+            />
+          )}
+
+          <div className="mt-4 flex items-center gap-3 flex-wrap">
             <button
               type="button"
               onClick={submit}
@@ -367,53 +525,7 @@ export default function BulkCaptionsPage() {
         bulkError={bulkError}
         onApplyToAll={async (parentIds) => {
           if (!lastUsedOpts) return;
-          setBulkBusy(true);
-          setBulkNotice(null);
-          setBulkError(null);
-          try {
-            const payload: CaptionRenderOpts = {
-              style: lastUsedOpts.style,
-              position: lastUsedOpts.position,
-              wordsPerLine: lastUsedOpts.wordsPerLine,
-              uppercase: lastUsedOpts.uppercase,
-            };
-            if (lastUsedOpts.posXFrac !== null)
-              payload.posXFrac = lastUsedOpts.posXFrac;
-            if (lastUsedOpts.posYFrac !== null)
-              payload.posYFrac = lastUsedOpts.posYFrac;
-            if (lastUsedOpts.primaryColor)
-              payload.primaryColor = lastUsedOpts.primaryColor;
-            if (lastUsedOpts.outlineColor)
-              payload.outlineColor = lastUsedOpts.outlineColor;
-            if (lastUsedOpts.outlineWidth !== null)
-              payload.outlineWidth = lastUsedOpts.outlineWidth;
-            if (lastUsedOpts.bgColor)
-              payload.bgColor = lastUsedOpts.bgColor;
-            if (lastUsedOpts.bgAlpha !== null)
-              payload.bgAlpha = lastUsedOpts.bgAlpha;
-            if (lastUsedOpts.fontSize !== null)
-              payload.fontSize = lastUsedOpts.fontSize;
-            if (lastUsedOpts.fontFamily)
-              payload.fontFamily = lastUsedOpts.fontFamily;
-            if (lastUsedOpts.shadow !== null)
-              payload.shadow = lastUsedOpts.shadow;
-            const res = await apiClient.submitCaptionsRenderBulk(
-              parentIds,
-              payload,
-            );
-            const parts = [`${res.summary.queued} queued`];
-            if (res.summary.rejected > 0)
-              parts.push(`${res.summary.rejected} rejected`);
-            setBulkNotice(parts.join(" · "));
-            await refreshJobs();
-            await refresh();
-          } catch (e) {
-            setBulkError(
-              e instanceof ApiError ? e.message : "Bulk render failed.",
-            );
-          } finally {
-            setBulkBusy(false);
-          }
+          await runBulkApply(parentIds, lastUsedOpts);
         }}
       />
     </div>
@@ -454,9 +566,9 @@ type RenderOpts = {
 };
 
 const DEFAULT_OPTS: RenderOpts = {
-  style: "bold",
+  style: "plain",
   position: "bottom",
-  wordsPerLine: 2,
+  wordsPerLine: 3,
   uppercase: false,
   posXFrac: null,
   posYFrac: null,
@@ -495,6 +607,11 @@ function Editor({
   renders,
   onClose,
   onRendered,
+  projectSiblings,
+  onApplyToProject,
+  bulkBusy,
+  bulkNotice,
+  bulkError,
 }: {
   job: Job;
   renders: Job[];
@@ -502,6 +619,16 @@ function Editor({
   /** Called after a successful submit. `opts` lets the parent remember
    *  the last-used render settings for the bulk "Apply to all" action. */
   onRendered: (opts?: RenderOpts) => Promise<void> | void;
+  /** Other transcribed videos in the SAME project as `job`. Empty when
+   *  this video is the only one in its project (or unfiled). */
+  projectSiblings: Job[];
+  /** Fire the bulk-render with the current editor opts onto every
+   *  sibling parent id. Parent's `onApplyToAll` already exists; we
+   *  just delegate. */
+  onApplyToProject: (parentIds: string[], opts: RenderOpts) => Promise<void> | void;
+  bulkBusy: boolean;
+  bulkNotice: string | null;
+  bulkError: string | null;
 }) {
   const [opts, setOpts] = useState<RenderOpts>(DEFAULT_OPTS);
   const [transcript, setTranscript] = useState<TranscriptResponse | null>(null);
@@ -607,6 +734,33 @@ function Editor({
   // user sees REAL burned-in captions, not the drag-preview overlay).
   // The "Show original" toggle lets them flip back when restyling.
   const [showOriginal, setShowOriginal] = useState(false);
+
+  // Auto-flip back to the original when the user starts editing (changes
+  // style, position, slider, or any Customize knob). Otherwise they see
+  // the burned mp4 with no drag handle and think the editor is broken.
+  // We watch the same opts the render endpoint cares about.
+  const optsFingerprint = JSON.stringify({
+    s: opts.style,
+    p: opts.position,
+    w: opts.wordsPerLine,
+    u: opts.uppercase,
+    pc: opts.primaryColor,
+    oc: opts.outlineColor,
+    ow: opts.outlineWidth,
+    bc: opts.bgColor,
+    ba: opts.bgAlpha,
+    fs: opts.fontSize,
+    ff: opts.fontFamily,
+    sh: opts.shadow,
+  });
+  const firstFingerprintRef = useRef(optsFingerprint);
+  useEffect(() => {
+    if (optsFingerprint !== firstFingerprintRef.current) {
+      firstFingerprintRef.current = optsFingerprint;
+      setShowOriginal(true);
+    }
+  }, [optsFingerprint]);
+
   const showingBurned = !!lastDoneRender && !activeRender && !showOriginal;
   const playerSrc = showingBurned
     ? apiClient.jobOutputUrl(lastDoneRender.id, {
@@ -758,15 +912,17 @@ function Editor({
               }
             />
           )}
-          {/* Small badge telling the user what they're looking at + a
-              one-click toggle back to the original. */}
+          {/* Toggle + hint. On burned view we explicitly tell the user to
+              flip back to original if they want to drag/restyle, since the
+              drag overlay is intentionally hidden over the burned mp4. */}
           {lastDoneRender && !activeRender && (
             <button
               type="button"
               onClick={() => setShowOriginal((v) => !v)}
-              className="absolute top-3 right-3 z-10 text-[10px] uppercase tracking-[0.18em] font-mono px-2 py-1 rounded-full bg-black/60 text-white hover:bg-black/80 backdrop-blur"
+              className="absolute top-3 right-3 z-10 text-[11px] uppercase tracking-[0.18em] font-mono px-3 py-1.5 rounded-full bg-black/70 text-white hover:bg-[var(--accent)] hover:text-black backdrop-blur border border-white/20"
+              title={showingBurned ? "Switch to original video to drag captions or edit style" : "View the captioned render"}
             >
-              {showingBurned ? "Captioned · show original" : "Original · show captioned"}
+              {showingBurned ? "Captioned · edit original" : "Original · show captioned"}
             </button>
           )}
         </div>
@@ -1191,6 +1347,41 @@ function Editor({
                 : "Render captioned video →"}
         </button>
 
+        {/* Apply current style to every other video in the same project.
+            Only meaningful once THIS video has rendered successfully —
+            otherwise the user is bulk-applying a style they haven't
+            previewed. Shows project sibling count and queue status. */}
+        {lastDoneRender && projectSiblings.length > 0 && (
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() =>
+                onApplyToProject(
+                  projectSiblings.map((j) => j.id),
+                  opts,
+                )
+              }
+              disabled={bulkBusy}
+              className="w-full inline-flex h-10 items-center justify-center px-5 rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 text-[var(--accent)] text-[12px] font-semibold uppercase tracking-[0.14em] hover:bg-[var(--accent)]/20 disabled:opacity-40 disabled:cursor-not-allowed"
+              title={`Render the other ${projectSiblings.length} videos in this project with the same style`}
+            >
+              {bulkBusy
+                ? "Submitting…"
+                : `Apply this style to ${projectSiblings.length} other video${
+                    projectSiblings.length === 1 ? "" : "s"
+                  } in project`}
+            </button>
+            {bulkNotice && (
+              <p className="text-[11.5px] text-[var(--accent)] font-mono">
+                {bulkNotice}
+              </p>
+            )}
+            {bulkError && (
+              <p className="text-[11.5px] text-red-300 font-mono">✕ {bulkError}</p>
+            )}
+          </div>
+        )}
+
         {/* Remove captions — only visible once a captioned render exists.
             Wipes the burned mp4 + clears the activeCaptionsJobId pointer
             on the parent. Original video + transcript are kept so the
@@ -1351,7 +1542,7 @@ function DraggableCaption({
   }
 
   const baseText = currentLine.words.map((w) => w.word).join(" ");
-  const text = opts.uppercase || opts.style === "bold" ? baseText.toUpperCase() : baseText;
+  const text = opts.uppercase ? baseText.toUpperCase() : baseText;
 
   // If the user has touched ANY Customize-tab knob, switch the preview
   // to a generic "effective values" render so they see their tweaks
@@ -1426,29 +1617,15 @@ function DraggableCaption({
         {text}
       </span>
     );
-  } else if (opts.style === "bold") {
-    captionEl = (
-      <span
-        className="inline-block font-extrabold leading-tight tracking-wide"
-        style={{
-          color: "#FFFFFF",
-          fontSize: "clamp(12px, 3.6cqh, 26px)",
-          paintOrder: "stroke fill",
-          WebkitTextStroke: "3px #000",
-          textShadow:
-            "0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000",
-        }}
-      >
-        {text}
-      </span>
-    );
   } else if (opts.style === "highlight") {
     captionEl = (
       <span
-        className="inline-block rounded font-semibold leading-tight"
+        className="inline-block rounded font-bold leading-tight"
         style={{
-          background: "var(--accent)",
-          color: "#0a0a0a",
+          background: "#00F0FF",
+          color: "#FFFFFF",
+          paintOrder: "stroke fill",
+          WebkitTextStroke: "1px #000",
           fontSize: "clamp(12px, 3.6cqh, 26px)",
           padding: "0.24em 0.8em",
         }}
@@ -1625,13 +1802,12 @@ function DraggableCaption({
   } else if (opts.style === "underline") {
     captionEl = (
       <span
-        className="inline-block font-semibold leading-tight"
+        className="inline-block font-extrabold leading-tight tracking-wide"
         style={{
           color: "#FFFFFF",
           fontSize: "clamp(12px, 3.6cqh, 26px)",
-          padding: "0.12em 0.55em",
-          background:
-            "linear-gradient(to top, rgba(0,240,255,0.65) 0%, rgba(0,240,255,0.65) 22%, transparent 22%)",
+          paintOrder: "stroke fill",
+          WebkitTextStroke: "2.5px #00F0FF",
         }}
       >
         {text}
@@ -1646,9 +1822,8 @@ function DraggableCaption({
           color: "#FFF1D0",
           fontSize: "clamp(11px, 3.3cqh, 22px)",
           padding: "0.25em 0.85em",
+          // ASS has no rounded corners — keep this square to match.
           border: "3px solid #FFF",
-          borderRadius: "999px",
-          boxShadow: "0 3px 0 rgba(0,0,0,0.45), 0 6px 14px rgba(0,0,0,0.4)",
         }}
       >
         {text}
@@ -1684,7 +1859,7 @@ function DraggableCaption({
           paintOrder: "stroke fill",
           WebkitTextStroke: "3px #B30000",
           textShadow:
-            "0 0 10px rgba(255,193,7,0.65), 0 0 18px rgba(179,0,0,0.5)",
+            "3px 3px 0 rgba(179,0,0,0.7)",
           letterSpacing: "0.06em",
         }}
       >
@@ -1832,6 +2007,12 @@ function Library({
   bulkError: string | null;
   onApplyToAll: (parentIds: string[]) => Promise<void> | void;
 }) {
+  // Show 4 projects per page in the "Ready" section. Anything older
+  // collapses under a "Show more" button so the page doesn't grow
+  // unbounded as the user accumulates batches.
+  const READY_PROJECTS_PER_PAGE = 4;
+  const [readyPage, setReadyPage] = useState(1);
+
   if (jobs.length === 0) return null;
 
   const transcribing = jobs.filter(
@@ -1841,6 +2022,18 @@ function Library({
   const broken = jobs.filter(
     (j) => j.status === "failed" || j.status === "cancelled",
   );
+
+  // Group ready by project, then slice for pagination.
+  const readyGroups = groupTranscribesByProject(ready);
+  const totalReadyPages = Math.max(
+    1,
+    Math.ceil(readyGroups.length / READY_PROJECTS_PER_PAGE),
+  );
+  const visibleReadyGroups = readyGroups.slice(
+    0,
+    readyPage * READY_PROJECTS_PER_PAGE,
+  );
+  const hasMoreReady = readyPage < totalReadyPages;
 
   // Which "ready" parents currently have NO completed render? Those are
   // the candidates for "Apply style to all". We also list parents that
@@ -1954,16 +2147,50 @@ function Library({
 
       {ready.length > 0 && (
         <Section title="Ready to caption" count={ready.length}>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {ready.map((j) => (
-              <TranscribedCard
-                key={j.id}
-                job={j}
-                renders={rendersByParent.get(j.id) ?? []}
-                isEditing={editingId === j.id}
-                onEdit={() => onEdit(j.id)}
-              />
+          {/* Project-grouped layout. Jobs without a projectId go into
+              an "(Unfiled)" bucket so legacy uploads stay visible.
+              Paginated so a user with 50 projects doesn't have to
+              scroll forever — older projects load behind "Show more". */}
+          <div className="space-y-4">
+            {visibleReadyGroups.map((group) => (
+              <div
+                key={group.projectId ?? "unfiled"}
+                className="rounded-lg border border-[var(--line)] bg-[var(--surface)]/40 p-3"
+              >
+                <div className="flex items-center justify-between gap-3 mb-3 px-1 flex-wrap">
+                  <div className="flex items-center gap-3">
+                    <h3 className="text-[12px] font-mono uppercase tracking-[0.18em] text-[var(--accent)]">
+                      {group.projectName}
+                    </h3>
+                    <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--muted)]">
+                      {group.jobs.length} video{group.jobs.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {group.jobs.map((j) => (
+                    <TranscribedCard
+                      key={j.id}
+                      job={j}
+                      renders={rendersByParent.get(j.id) ?? []}
+                      isEditing={editingId === j.id}
+                      onEdit={() => onEdit(j.id)}
+                    />
+                  ))}
+                </div>
+              </div>
             ))}
+            {hasMoreReady && (
+              <div className="flex items-center justify-center pt-2">
+                <button
+                  type="button"
+                  onClick={() => setReadyPage((p) => p + 1)}
+                  className="text-[11px] font-mono uppercase tracking-[0.18em] px-4 py-2 rounded-full border border-[var(--line)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                >
+                  Show more projects ({readyGroups.length - visibleReadyGroups.length} remaining)
+                </button>
+              </div>
+            )}
           </div>
         </Section>
       )}
@@ -2034,10 +2261,11 @@ function TranscribedCard({
         {lastDone && (
           <a
             href={apiClient.jobOutputUrl(lastDone.id, { variant: "active" })}
-            className="h-8 px-3 inline-flex items-center rounded-full border border-[var(--line)] text-[11.5px] text-white hover:border-[var(--accent)]"
+            download
+            className="h-8 px-3 inline-flex items-center rounded-full border border-[var(--line)] text-[11.5px] font-mono uppercase tracking-[0.14em] text-white hover:border-[var(--accent)] hover:text-[var(--accent)]"
             title="Download latest captioned mp4"
           >
-            ↓
+            Download
           </a>
         )}
       </div>
@@ -2089,6 +2317,34 @@ function ProgressCard({ job }: { job: Job }) {
     </div>
   );
 }
+
+/** Group bulk-captions transcribe jobs by their projectId, preserving
+ *  the input array's order (which is already newest-first). Jobs that
+ *  pre-date the project feature have no projectId — they bucket into
+ *  one "(Unfiled)" group so the user can still see them. */
+function groupTranscribesByProject(jobs: Job[]): {
+  projectId: string | null;
+  projectName: string;
+  jobs: Job[];
+}[] {
+  const order: (string | null)[] = [];
+  const buckets = new Map<string | null, { projectName: string; jobs: Job[] }>();
+  for (const j of jobs) {
+    const pid = j.projectId ?? null;
+    if (!buckets.has(pid)) {
+      order.push(pid);
+      const name = j.projectName || (pid ? "Untitled project" : "(Unfiled)");
+      buckets.set(pid, { projectName: name, jobs: [] });
+    }
+    buckets.get(pid)!.jobs.push(j);
+  }
+  return order.map((pid) => ({
+    projectId: pid,
+    projectName: buckets.get(pid)!.projectName,
+    jobs: buckets.get(pid)!.jobs,
+  }));
+}
+
 
 function FailedCard({ job }: { job: Job }) {
   const filename = job.label || `Job ${job.id.slice(0, 8)}`;

@@ -44,6 +44,42 @@ from user_keys import get_gemini_key, NoApiKeyError
 
 TRANSCRIBE_MODEL = "gemini-flash-latest"
 
+
+# Anything that isn't a letter, digit, apostrophe (for "don't"), or hyphen
+# (for "well-known"). Keeps the spoken word, drops the punctuation Gemini
+# was attaching like "saurabh.", "hello,", "okay:" → "saurabh", "hello", "okay".
+_PUNCT_STRIP_RE = re.compile(r"[^\w'\-ऀ-ॿ]+", re.UNICODE)
+
+
+def _clean_word(w: str) -> str:
+    """Strip leading/trailing punctuation. Returns "" for tokens that are
+    nothing but punctuation (so the caller can skip them)."""
+    if not w:
+        return ""
+    cleaned = _PUNCT_STRIP_RE.sub("", w).strip()
+    return cleaned
+
+
+def _sanitize_words(words: list[dict]) -> list[dict]:
+    """Strip punctuation from every word entry; drop now-empty entries.
+    Safe to call on either fresh-transcribed words or cached words from
+    the parent job doc — so old jobs re-rendered after this fix still
+    come out clean."""
+    out: list[dict] = []
+    for w in words or []:
+        if not isinstance(w, dict):
+            continue
+        cleaned = _clean_word(str(w.get("word") or ""))
+        if not cleaned:
+            continue
+        try:
+            s = float(w.get("start"))
+            e = float(w.get("end"))
+        except (TypeError, ValueError):
+            continue
+        out.append({"word": cleaned, "start": s, "end": e})
+    return out
+
 # Audio longer than this gets split into parallel chunks for transcription.
 # Single Gemini call on a 10-min file routinely takes 60-90s; 4 parallel
 # 60s chunks finish in ~25s and the upload calls overlap network latency
@@ -51,6 +87,14 @@ TRANSCRIBE_MODEL = "gemini-flash-latest"
 TRANSCRIBE_CHUNK_THRESHOLD_SEC = 75.0
 TRANSCRIBE_CHUNK_SIZE_SEC = 60.0
 TRANSCRIBE_PARALLEL_WORKERS = 4
+
+# Process-wide cap on concurrent Gemini transcribe calls. Multiple bulk
+# jobs running in parallel would otherwise multiply (4 per job × N jobs)
+# and rate-limit each other. This semaphore serialises overflow so each
+# call gets full bandwidth instead of all of them stalling.
+_TRANSCRIBE_GLOBAL_SEMAPHORE = threading.Semaphore(
+    int(os.environ.get("TRANSCRIBE_GLOBAL_CONCURRENCY", "4"))
+)
 
 ASSETS = Path(__file__).parent.parent / "assets"
 FONT_PATH = ASSETS / "fonts" / "Inter-Bold.ttf"
@@ -181,36 +225,63 @@ def _transcribe_words(client, audio_path: Path, retries: int = 3) -> list[dict]:
 Listen to this audio carefully. Transcribe every spoken word and return
 it with word-level timing.
 
-Return STRICT JSON (no markdown fences):
-{
-  "words": [
-    {"word": "Hello", "start": 0.12, "end": 0.46},
-    {"word": "world", "start": 0.55, "end": 0.91},
-    ...
-  ]
-}
-
 Rules:
-- One word per item (split on whitespace; keep punctuation attached to
-  the previous word).
+- One spoken word per item. DO NOT include punctuation — return only the
+  bare word (e.g. "hello" not "hello,", "saurabh" not "saurabh.").
 - Times in SECONDS (not ms), with up to 2 decimal places.
 - Times must be monotonically non-decreasing.
-- If the audio has no speech, return {"words": []}.
+- If the audio has no speech, return an empty list.
 """
+
+    # Strongly-typed response schema — eliminates the "Gemini returned
+    # malformed JSON" failure mode that caused silent retries+slowdowns.
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "words": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "word": {"type": "string"},
+                        "start": {"type": "number"},
+                        "end": {"type": "number"},
+                    },
+                    "required": ["word", "start", "end"],
+                },
+            },
+        },
+        "required": ["words"],
+    }
+
+    # Hard upper bound per Gemini call. Without this, a single stuck
+    # request can wedge a worker thread for many minutes — exactly the
+    # "job sits at 'Transcribing audio…' for 6 min" symptom users saw.
+    GEMINI_CALL_TIMEOUT_SEC = 90.0
+
+    def _do_one_call() -> str:
+        uploaded = client.files.upload(file=str(audio_path))
+        resp = client.models.generate_content(
+            model=TRANSCRIBE_MODEL,
+            contents=[uploaded, instruction],
+            config=gtypes.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema,
+                temperature=0.0,
+            ),
+        )
+        return (resp.text or "").strip()
 
     last_err: Optional[str] = None
     for attempt in range(retries):
         try:
-            uploaded = client.files.upload(file=str(audio_path))
-            resp = client.models.generate_content(
-                model=TRANSCRIBE_MODEL,
-                contents=[uploaded, instruction],
-                config=gtypes.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.0,
-                ),
-            )
-            text = (resp.text or "").strip()
+            # cf.ThreadPoolExecutor for a timeout that actually fires on
+            # network-stuck calls. The underlying request will keep
+            # running in its thread until the SDK returns, but we move on.
+            with _TRANSCRIBE_GLOBAL_SEMAPHORE:
+                with cf.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(_do_one_call)
+                    text = fut.result(timeout=GEMINI_CALL_TIMEOUT_SEC)
             text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.MULTILINE).strip()
             parsed = json.loads(text)
 
@@ -221,7 +292,8 @@ Rules:
             for item in raw:
                 if not isinstance(item, dict):
                     continue
-                w = str(item.get("word") or "").strip()
+                raw_w = str(item.get("word") or "").strip()
+                w = _clean_word(raw_w)
                 if not w:
                     continue
                 try:
@@ -235,6 +307,9 @@ Rules:
             return words
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
+            # Print on every retry so a hung transcribe shows WHICH call
+            # is failing and why, instead of silently sleeping in the loop.
+            print(f"[captions._transcribe_words] attempt {attempt+1}/{retries} failed: {last_err}")
             time.sleep(2.0 * (attempt + 1))
     print(f"[captions._transcribe_words] giving up: {last_err}")
     return []
@@ -280,16 +355,89 @@ def transcribe_words(
     job_id: Optional[str] = None,
     progress_lo: int = 10,
     progress_hi: int = 80,
+    language: Optional[str] = None,
 ) -> list[dict]:
     """
     Public entrypoint. Transcribes an audio file into word-level
-    timestamps, chunking + parallelising for long inputs.
+    timestamps.
 
-    For audio <= TRANSCRIBE_CHUNK_THRESHOLD_SEC we just call
-    `_transcribe_words` directly. Longer audio is split into 60s slices,
-    transcribed in parallel, and the chunk-local timestamps are offset
-    back to global time before merging.
+    Provider routing via TRANSCRIBE_PROVIDER env var:
+      - "whisper" (default): local faster-whisper. Free, native word
+        alignment, no chunking needed. Best caption-audio sync.
+      - "gemini": Gemini Flash via the chunked+parallel path below.
+        Kept as fallback for environments where the whisper model can't
+        load (low memory, missing deps). `client` must be a genai.Client.
+
+    On whisper failure we fall back to Gemini automatically — keeps
+    captions working even if the whisper model can't load.
     """
+    provider = os.environ.get("TRANSCRIBE_PROVIDER", "whisper").lower()
+
+    if provider == "whisper":
+        try:
+            from .whisper_local import transcribe_words_local
+        except ImportError:
+            try:
+                from whisper_local import transcribe_words_local  # type: ignore
+            except ImportError:
+                from tools.whisper_local import transcribe_words_local  # type: ignore
+        if job_id:
+            # Generic message — never expose the underlying engine to users.
+            # If another job is already transcribing we surface that fact
+            # so the user understands the 15% bar isn't frozen — they're
+            # just queued behind another video on the same CPU pipeline.
+            try:
+                from .whisper_local import TRANSCRIBE_BUSY  # type: ignore
+            except ImportError:
+                try:
+                    from whisper_local import TRANSCRIBE_BUSY  # type: ignore
+                except ImportError:
+                    from tools.whisper_local import TRANSCRIBE_BUSY  # type: ignore
+            if TRANSCRIBE_BUSY.is_set():
+                progress(
+                    job_id,
+                    pct=progress_lo,
+                    message="Waiting in transcribe queue…",
+                )
+            else:
+                progress(job_id, pct=progress_lo, message="Transcribing audio…")
+
+        # Whisper decode is slow on CPU (~3 min per 1 min audio at the
+        # medium model), so without a streamed progress signal the UI
+        # bar freezes at progress_lo for minutes. We surface per-segment
+        # progress as it decodes.
+        def _on_seg(frac: float, seg_end: float, duration: float) -> None:
+            if not job_id:
+                return
+            span = max(1, progress_hi - 5 - progress_lo)
+            pct = progress_lo + int(span * frac)
+            progress(
+                job_id,
+                pct=pct,
+                message=f"Transcribing audio… {int(seg_end)}s / {int(duration)}s",
+            )
+
+        try:
+            words = transcribe_words_local(
+                audio_path,
+                language=language,
+                on_progress=_on_seg,
+            )
+            if job_id:
+                progress(job_id, pct=progress_hi - 5, message=f"Transcribed {len(words)} words.")
+            # Apply the same punctuation/whitespace cleanup the Gemini
+            # path already runs through _clean_word.
+            cleaned: list[dict] = []
+            for w in words:
+                txt = _clean_word(str(w.get("word") or ""))
+                if not txt:
+                    continue
+                cleaned.append({"word": txt, "start": float(w["start"]), "end": float(w["end"])})
+            return cleaned
+        except Exception as e:
+            print(f"[captions.transcribe_words] whisper failed, falling back to gemini: {type(e).__name__}: {e}")
+            # fall through to gemini path below
+
     duration = _audio_duration_sec(audio_path)
 
     # Short clip — single call is fine.
@@ -446,37 +594,25 @@ def _group_words_into_lines(words: list[dict], words_per_line: int) -> list[dict
 
 STYLE_PRESETS = {
     # ----- Original 4 -----
-    # Plain — white text, semi-transparent black pill behind, bottom
+    # Plain — white text, semi-transparent black pill behind, bottom.
+    # outline_width / shadow are now % of font_size (was abs pixels).
     "plain": {
         "label": "Plain",
         "primary": "white",
         "outline": "black",
-        "outline_width": 2,
+        "outline_width": 9,   # % of font size
         "back_alpha": 80,   # 0=opaque, 255=transparent
         "back_color": "black",
         "font_size_ratio": 0.045,  # of video height
         "bold": True,
         "use_back": True,
     },
-    # Bold — white shouty caps, thick black outline, no background
-    "bold": {
-        "label": "Bold",
-        "primary": "white",
-        "outline": "black",
-        "outline_width": 5,
-        "back_alpha": 255,
-        "back_color": "black",
-        "font_size_ratio": 0.052,
-        "bold": True,
-        "uppercase": True,
-        "use_back": False,
-    },
     # Highlight — white text, cyan box behind active line (your brand colour)
     "highlight": {
         "label": "Highlight",
         "primary": "white",
         "outline": "black",
-        "outline_width": 1,
+        "outline_width": 5,  # % of font size
         "back_alpha": 0,   # opaque
         "back_color": "cyan",
         "font_size_ratio": 0.045,
@@ -488,7 +624,7 @@ STYLE_PRESETS = {
         "label": "Karaoke",
         "primary": "yellow",
         "outline": "black",
-        "outline_width": 3,
+        "outline_width": 7,   # % of font size
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.05,
@@ -502,21 +638,22 @@ STYLE_PRESETS = {
         "label": "Outline",
         "primary": "cyan",
         "outline": "black",
-        "outline_width": 6,
+        "outline_width": 13,  # % of font size
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.05,
         "bold": True,
         "use_back": False,
     },
-    # Neon — cyan letters with strong cyan halo (heavy outline of same hue +
-    # max shadow). Reads as glowing tubes against the video frame.
+    # Neon — cyan letters with strong cyan halo. libass shadow is just a
+    # solid offset, not a blur, so to read as "glow" we lean hard on the
+    # cyan outline. % of font_size keeps ratios stable across resolutions.
     "neon": {
         "label": "Neon",
         "primary": "white",
         "outline": "cyan",
-        "outline_width": 4,
-        "shadow": 4,        # px shadow used as soft glow halo
+        "outline_width": 16,  # % of font size
+        "shadow": 7,          # % of font size
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.05,
@@ -530,7 +667,7 @@ STYLE_PRESETS = {
         "label": "Gradient",
         "primary": "cyan",
         "outline": "navy",
-        "outline_width": 5,
+        "outline_width": 11,  # % of font size
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.052,
@@ -543,7 +680,7 @@ STYLE_PRESETS = {
         "label": "Typewriter",
         "primary": "white",
         "outline": "black",
-        "outline_width": 1,
+        "outline_width": 5,  # % of font size
         "back_alpha": 0,   # opaque pill
         "back_color": "black",
         "font_size_ratio": 0.04,
@@ -560,7 +697,7 @@ STYLE_PRESETS = {
         "label": "News",
         "primary": "white",
         "outline": "darkred",
-        "outline_width": 2,
+        "outline_width": 10,  # % of font size
         "back_alpha": 0,   # opaque
         "back_color": "darkred",
         "font_size_ratio": 0.044,
@@ -569,15 +706,17 @@ STYLE_PRESETS = {
         "category": "classic",
     },
     # Cinema subtitle — soft white drop, no fill, no caps; lower-third look.
+    # Italic so it reads like proper film subtitle typography.
     "cinema": {
         "label": "Cinema",
         "primary": "white",
         "outline": "black",
-        "outline_width": 3,
+        "outline_width": 9,   # % of font size
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.038,
         "bold": False,
+        "italic": True,
         "use_back": False,
         "category": "classic",
     },
@@ -589,12 +728,15 @@ STYLE_PRESETS = {
         "label": "MrBeast",
         "primary": "yellow",
         "outline": "black",
-        "outline_width": 7,
-        "shadow": 3,
+        "outline_width": 12,  # % of font size — heavy but doesn't fill in
+        "shadow": 4,          # % of font size (drop)
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.058,
-        "bold": True,
+        # Anton has no native bold; libass would synthesise a fat stroke
+        # that distorts the condensed glyphs into rounded blobs. The
+        # font is already display-bold at its native weight.
+        "bold": False,
         "uppercase": True,
         "use_back": False,
         "category": "trendy",
@@ -605,11 +747,12 @@ STYLE_PRESETS = {
         "label": "Reels",
         "primary": "lime",
         "outline": "black",
-        "outline_width": 5,
+        "outline_width": 10,  # % of font size
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.055,
-        "bold": True,
+        # See mrbeast — Anton is display-bold natively, no synthesis.
+        "bold": False,
         "uppercase": True,
         "use_back": False,
         "category": "trendy",
@@ -620,12 +763,13 @@ STYLE_PRESETS = {
         "label": "TikTok",
         "primary": "white",
         "outline": "hotpink",
-        "outline_width": 5,
-        "shadow": 2,
+        "outline_width": 10,  # % of font size
+        "shadow": 3,           # % of font size
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.053,
-        "bold": True,
+        # See mrbeast — Anton is display-bold natively, no synthesis.
+        "bold": False,
         "use_back": False,
         "category": "trendy",
         "fontname": "Anton",
@@ -633,30 +777,35 @@ STYLE_PRESETS = {
 
     # MINIMAL
     # Whisper — soft grey lowercase text, almost no outline; understated.
+    # `lowercase` is enforced at burn time so the tile preview and the
+    # final mp4 stay in lockstep.
     "whisper": {
         "label": "Whisper",
         "primary": "silver",
         "outline": "black",
-        "outline_width": 1,
+        "outline_width": 6,  # % of font size
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.036,
         "bold": False,
+        "lowercase": True,
         "use_back": False,
         "category": "minimal",
     },
-    # Underline — white text with no outline, sitting on a thin cyan
-    # background band that mimics a single-line underline.
+    # Underline — white text with a thick cyan "underline" effect.
+    # libass can't do partial-height backgrounds, so we approximate with
+    # a thick cyan outline (acts like a heavy underline + edge glow).
     "underline": {
         "label": "Underline",
         "primary": "white",
         "outline": "cyan",
-        "outline_width": 1,
-        "back_alpha": 80,
-        "back_color": "navy",
-        "font_size_ratio": 0.042,
+        "outline_width": 12,  # % of font size
+        "shadow": 0,
+        "back_alpha": 255,
+        "back_color": "black",
+        "font_size_ratio": 0.046,
         "bold": True,
-        "use_back": True,
+        "use_back": False,
         "category": "minimal",
     },
 
@@ -667,7 +816,7 @@ STYLE_PRESETS = {
         "label": "Sticker",
         "primary": "cream",
         "outline": "white",
-        "outline_width": 4,
+        "outline_width": 9,   # % of font size
         "back_alpha": 0,
         "back_color": "black",
         "font_size_ratio": 0.046,
@@ -680,12 +829,13 @@ STYLE_PRESETS = {
         "label": "Comic",
         "primary": "yellow",
         "outline": "black",
-        "outline_width": 6,
-        "shadow": 2,
+        "outline_width": 11,  # % of font size
+        "shadow": 3,           # % of font size
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.054,
-        "bold": True,
+        # Bangers is single-weight; synthesised bold ruins the comic style.
+        "bold": False,
         "uppercase": True,
         "use_back": False,
         "category": "decorative",
@@ -696,12 +846,13 @@ STYLE_PRESETS = {
         "label": "Retro",
         "primary": "amber",
         "outline": "darkred",
-        "outline_width": 4,
-        "shadow": 3,
+        "outline_width": 9,   # % of font size
+        "shadow": 5,           # % of font size
         "back_alpha": 255,
         "back_color": "black",
         "font_size_ratio": 0.05,
-        "bold": True,
+        # See mrbeast — Anton is display-bold natively, no synthesis.
+        "bold": False,
         "uppercase": True,
         "use_back": False,
         "category": "decorative",
@@ -761,10 +912,13 @@ def _write_ass(
     """
     preset = STYLE_PRESETS.get(style) or STYLE_PRESETS["plain"]
     use_upper = preset.get("uppercase", False) or uppercase_override
+    use_lower = preset.get("lowercase", False)
     # Global scale so the captions fit within frame width without libass
     # auto-wrapping (which split each word onto its own line). Tuned by
-    # eye on 1080-wide reels content with 4-5 words per line.
-    FONT_SCALE = 0.72
+    # eye on 1080-wide reels content with 3-4 words per line. Bumped
+    # from 0.72 → 0.95 — users felt the captions were too small in the
+    # final render compared to the preview tile.
+    FONT_SCALE = 0.95
     if font_size_override is not None and font_size_override > 0:
         font_size = max(12, int(font_size_override))
     else:
@@ -778,15 +932,22 @@ def _write_ass(
         back_alpha = int(preset["back_alpha"])
     back_with_alpha = back.replace("&H00", f"&H{back_alpha:02X}", 1)
     border_style = 4 if preset["use_back"] else 1   # 4 = box bg, 1 = outline only
+    # outline_width / shadow values in STYLE_PRESETS are PERCENTAGES of
+    # the actual font_size so the visual proportion stays constant
+    # across video resolutions AND matches the cqh-based demo tile.
+    # Example: outline_width=10 + font_size=96px → 9.6px stroke.
     if outline_width_override is not None:
         outline_w = max(0, int(outline_width_override))
     else:
-        outline_w = int(preset["outline_width"])
+        outline_pct = float(preset["outline_width"])
+        outline_w = max(0, int(round(font_size * outline_pct / 100)))
     if shadow_override is not None:
         shadow_w = max(0, int(shadow_override))
     else:
-        shadow_w = int(preset.get("shadow", 0))   # Used by neon for the halo
+        shadow_pct = float(preset.get("shadow", 0))
+        shadow_w = max(0, int(round(font_size * shadow_pct / 100)))
     bold = -1 if preset.get("bold") else 0
+    italic = -1 if preset.get("italic") else 0
     alignment = _ass_alignment(position)
     fontname = str(font_family or preset.get("fontname") or "Inter")
 
@@ -805,7 +966,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{fontname},{font_size},{primary},&H000000FF&,{outline},{back_with_alpha},{bold},0,0,0,100,100,0,0,{border_style},{outline_w},{shadow_w},{alignment},{margin_h},{margin_h},{margin_v},1
+Style: Default,{fontname},{font_size},{primary},&H000000FF&,{outline},{back_with_alpha},{bold},{italic},0,0,100,100,0,0,{border_style},{outline_w},{shadow_w},{alignment},{margin_h},{margin_h},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -831,6 +992,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         text = line["text"]
         if use_upper:
             text = text.upper()
+        elif use_lower:
+            text = text.lower()
 
         if style == "karaoke":
             # Per-word \k duration in centiseconds. The line starts at the
@@ -839,7 +1002,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             parts: list[str] = []
             for w in line["words"]:
                 cs = max(1, int(round((float(w["end"]) - float(w["start"])) * 100)))
-                wt = w["word"].upper() if use_upper else w["word"]
+                wt = (
+                    w["word"].upper() if use_upper
+                    else w["word"].lower() if use_lower
+                    else w["word"]
+                )
                 parts.append(f"{{\\kf{cs}}}{wt}")
             text = pos_prefix + " ".join(parts)
             start = _format_ass_time(line_start)
@@ -978,12 +1145,18 @@ def handle(job_id: str, user_id: str, params: dict) -> None:
     #    of four times.
     cached_words = parent.get("transcriptWords")
     if cached_words and isinstance(cached_words, list) and len(cached_words) > 0:
+        # Sanitize on read — strips punctuation from pre-fix cached
+        # transcripts so re-renders of older a2v jobs come out clean too.
+        words = _sanitize_words(cached_words)
         progress(
             job_id,
             pct=55,
-            message=f"Using cached transcript ({len(cached_words)} words)…",
+            message=f"Using cached transcript ({len(words)} words)…",
         )
-        words = cached_words
+        # If sanitizing changed anything, overwrite the cache so we don't
+        # keep redoing this work on every future re-render.
+        if words and words != cached_words:
+            update_job(str(parent_id), transcriptWords=words)
     else:
         try:
             api_key = get_gemini_key(user_id, user_plan=params.get("userPlan") or "")
