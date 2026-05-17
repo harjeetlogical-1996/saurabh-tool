@@ -1905,6 +1905,19 @@ def get_job_output(
     if doc.get("status") != "done":
         raise HTTPException(status_code=409, detail="Job is not complete yet.")
 
+    # Thumbnail short-circuit — separate from the main video flow. Free
+    # to fetch (no billing), 404 if not extracted (e.g. older jobs).
+    if variant == "thumb":
+        thumb = doc.get("thumbnailPath")
+        if not thumb or not Path(thumb).exists():
+            raise HTTPException(status_code=404, detail="No thumbnail.")
+        return FileResponse(
+            thumb,
+            media_type="image/jpeg",
+            filename=Path(thumb).name,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
     # Resolve which file to serve.
     output_path = doc.get("outputPath")
     if variant == "active":

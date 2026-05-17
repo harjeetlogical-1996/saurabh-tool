@@ -59,6 +59,30 @@ def _ffprobe() -> str:
     return "ffprobe"
 
 
+def _extract_thumbnail(video_path: Path, out_path: Path) -> bool:
+    """Pull a single small JPEG from the first second of the rendered
+    video so the UI can show a thumbnail next to each row. 360px-wide
+    keeps the file under ~30KB; aspect ratio is preserved. Best-effort:
+    on any ffmpeg error we just skip the thumbnail (callers default to
+    no-thumb UI). Returns True on success."""
+    try:
+        subprocess.run(
+            [
+                _ffmpeg(), "-y",
+                "-ss", "0.5",        # 0.5s in — skips black frame at t=0
+                "-i", str(video_path),
+                "-frames:v", "1",
+                "-vf", "scale=360:-2",
+                "-q:v", "5",         # decent quality, small file
+                str(out_path),
+            ],
+            capture_output=True, check=True, timeout=15,
+        )
+        return out_path.exists() and out_path.stat().st_size > 0
+    except Exception:
+        return False
+
+
 def _video_dims(path: Path) -> tuple[int, int]:
     """Return (width, height) of the first video stream. Falls back to
     (1080, 1920) if probing fails so render still produces something."""
@@ -515,15 +539,24 @@ def handle(job_id: str, user_id: str, params: dict) -> None:
                 pass
             raise
 
-    update_job(
-        job_id,
-        status="done",
-        progress=100,
-        message=f"Rendered {voice_dur:.1f}s clip.",
-        outputPath=str(out_path),
-        outputContentType="video/mp4",
-        videoDuration=voice_dur,
-    )
+    # Thumbnail (first frame, scaled to 360px wide). Best-effort —
+    # render success doesn't depend on this. Stored next to the output
+    # mp4 with a `.thumb.jpg` suffix so the output endpoint can serve
+    # it via `?variant=thumb`.
+    thumb_path = out_path.with_suffix(".thumb.jpg")
+    has_thumb = _extract_thumbnail(out_path, thumb_path)
+
+    update_job_kwargs = {
+        "status": "done",
+        "progress": 100,
+        "message": f"Rendered {voice_dur:.1f}s clip.",
+        "outputPath": str(out_path),
+        "outputContentType": "video/mp4",
+        "videoDuration": voice_dur,
+    }
+    if has_thumb:
+        update_job_kwargs["thumbnailPath"] = str(thumb_path)
+    update_job(job_id, **update_job_kwargs)
 
     # Auto-chain: queue a captions-transcribe job on the rendered mp4 so
     # the user can jump straight into the captions editor without re-

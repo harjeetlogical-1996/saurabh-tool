@@ -205,6 +205,10 @@ export type Job = {
   audioFilename: string | null;
   label: string | null;
   hasOutput: boolean;
+  /** Voice-pair jobs (and others that want it) get a first-frame
+   *  JPEG saved next to their output mp4. UI shows a small <img> in
+   *  the job row when this is true. */
+  hasThumbnail?: boolean;
   errorDetail: string | null;
   workerName: string | null;
   cancelRequested: boolean;
@@ -547,7 +551,10 @@ export const apiClient = {
    */
   jobOutputUrl: (
     jobId: string,
-    opts: { variant?: "active" | "original"; cacheKey?: string } = {},
+    opts: {
+      variant?: "active" | "original" | "thumb";
+      cacheKey?: string;
+    } = {},
   ) => {
     const url = new URL(BASE + `/me/jobs/${jobId}/output`);
     const devId = getDevUserId();

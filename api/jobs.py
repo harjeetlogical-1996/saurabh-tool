@@ -185,6 +185,10 @@ def serialize_job(doc: dict) -> dict:
         "audioFilename": params.get("audioFilename"),
         "label": params.get("label"),
         "hasOutput": bool(doc.get("outputPath")),
+        # True when a thumbnail JPEG was extracted alongside the
+        # output mp4. Frontend uses it to decide whether to render
+        # an <img> next to the row.
+        "hasThumbnail": bool(doc.get("thumbnailPath")),
         "errorDetail": doc.get("errorDetail"),
         "workerName": doc.get("workerName"),
         "cancelRequested": bool(doc.get("cancelRequested")),

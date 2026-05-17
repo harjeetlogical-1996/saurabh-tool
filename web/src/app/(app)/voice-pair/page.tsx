@@ -988,7 +988,7 @@ function ProjectCard({
 
   return (
     <li className="rounded-lg border border-[var(--line)] bg-[var(--surface)] overflow-hidden">
-      {/* Header: name + counts + action buttons */}
+      {/* Header: thumb + name + counts + action buttons */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-[var(--line)] bg-black/20">
         <button
           type="button"
@@ -1002,6 +1002,36 @@ function ProjectCard({
             ▶
           </span>
         </button>
+        {/* Project thumbnail — pick the first job in this project that
+            has one. Prefer a captioned render's thumb (matches what's
+            actually being delivered) over the bare voice-pair's. */}
+        {(() => {
+          for (const j of project.jobs) {
+            const cap = chainedCaptions.get(j.id);
+            const r = cap ? latestCaptionRender.get(cap.id) : null;
+            const src =
+              r && r.hasThumbnail
+                ? r
+                : j.hasThumbnail
+                  ? j
+                  : null;
+            if (src) {
+              return (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={apiClient.jobOutputUrl(src.id, {
+                    variant: "thumb",
+                    cacheKey: src.updatedAt ?? src.id,
+                  })}
+                  alt=""
+                  className="shrink-0 h-10 w-10 rounded object-cover border border-[var(--line)] bg-black/40"
+                  loading="lazy"
+                />
+              );
+            }
+          }
+          return null;
+        })()}
         <div className="flex-1 min-w-0">
           {renaming ? (
             <input
@@ -1487,9 +1517,41 @@ function VoicePairJobRow({
     // INSIDE a project-card's <li>, and nested <li> is invalid HTML.
     // The parent project-card supplies the <li> container.
     <div className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-3">
-      {/* Header row: filename + status (left) | actions (right). On
-          mobile actions wrap to a new line below the filename. */}
+      {/* Header row: thumbnail + filename + status (left) | actions
+          (right). On mobile actions wrap to a new line below. */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+        {/* Thumbnail — prefer the captioned render's thumbnail (shows
+            burned-in look) so the row matches what Preview will play.
+            Falls back to the voice-pair job's own thumbnail until
+            captions are rendered. 56x56 cover so portrait reels and
+            landscape clips both look balanced in the row. */}
+        {(() => {
+          const thumbSource =
+            captionRender && captionRender.hasThumbnail
+              ? captionRender
+              : job.hasThumbnail
+                ? job
+                : null;
+          if (!thumbSource) {
+            return (
+              <div className="shrink-0 h-14 w-14 rounded bg-black/40 border border-[var(--line)] flex items-center justify-center text-[var(--muted)] text-[10px] font-mono">
+                ···
+              </div>
+            );
+          }
+          return (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={apiClient.jobOutputUrl(thumbSource.id, {
+                variant: "thumb",
+                cacheKey: thumbSource.updatedAt ?? thumbSource.id,
+              })}
+              alt=""
+              className="shrink-0 h-14 w-14 rounded object-cover border border-[var(--line)] bg-black/40"
+              loading="lazy"
+            />
+          );
+        })()}
         <div className="flex-1 min-w-0">
           <div className="text-[13px] truncate">
             <span className="font-medium">{mediaName}</span>
