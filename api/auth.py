@@ -71,7 +71,14 @@ def current_user(request: Request) -> AuthUser:
             user = db.user.find_one({"_id": _maybe_object_id(dev_id)})
 
     if user is None:
-        cookie = request.cookies.get(SESSION_COOKIE_NAME)
+        # Better Auth auto-prefixes the cookie with __Secure- when the
+        # site runs on HTTPS (RFC 6265bis cookie-prefixes spec). The
+        # plain name is used on http://localhost. Check both so the
+        # same code works in dev and prod without a separate config.
+        cookie = (
+            request.cookies.get(f"__Secure-{SESSION_COOKIE_NAME}")
+            or request.cookies.get(SESSION_COOKIE_NAME)
+        )
         token = _extract_token(cookie)
         if not token:
             raise HTTPException(status_code=401, detail="Not signed in.")
