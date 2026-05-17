@@ -515,17 +515,68 @@ export default function VoicePairPage() {
         voice: voices[i].file,
         animation: pairUnits[i].items[0].animation,
       }));
-      // Backend auto-routes per-pair: pair_media size > 1 becomes a
-      // slideshow render; size = 1 uses the per-file path (so the
-      // image's animation choice still applies).
-      const res = await apiClient.submitVoicePair(pairs, {
-        mode: "single",
-        projectName: projectName.trim() || undefined,
-        language: language === "auto" ? undefined : language,
-      });
-      const parts = [`${res.summary.queued} queued in “${res.projectName}”`];
-      if (res.summary.rejected) parts.push(`${res.summary.rejected} rejected`);
-      setSubmitNotice(parts.join(" · "));
+
+      // CHUNK: Cloud Run HTTP/1.1 caps request body at 32 MB; a folder
+      // pair (5-10 media + a voice) easily blows that, and the proxy
+      // drops the connection BEFORE FastAPI sees it — browser shows a
+      // CORS/404 error that has nothing to do with our code. Send one
+      // pair per HTTP request and reuse the projectId returned by the
+      // first call so every pair lands under the same project group.
+      let projectId: string | undefined = undefined;
+      let projectNameOut = "";
+      let totalQueued = 0;
+      let totalRejected = 0;
+      const errors: string[] = [];
+
+      for (let i = 0; i < pairs.length; i++) {
+        try {
+          const res = await apiClient.submitVoicePair([pairs[i]], {
+            mode: "single",
+            // First call creates the project; later calls join it.
+            projectId,
+            projectName:
+              !projectId && projectName.trim()
+                ? projectName.trim()
+                : undefined,
+            language: language === "auto" ? undefined : language,
+          });
+          if (!projectId) {
+            projectId = res.projectId;
+            projectNameOut = res.projectName;
+          }
+          totalQueued += res.summary.queued;
+          totalRejected += res.summary.rejected;
+          // Live progress in the notice so the user sees pairs land
+          // one by one — folder uploads of 8-10 pairs take real time.
+          setSubmitNotice(
+            `Uploading… ${i + 1}/${pairs.length} pairs` +
+              (projectNameOut ? ` · ${projectNameOut}` : ""),
+          );
+        } catch (e) {
+          console.error(`[voice-pair submit] pair ${i + 1} failed:`, e);
+          const msg =
+            e instanceof ApiError
+              ? `${e.message} (HTTP ${e.status})`
+              : e instanceof Error
+                ? e.message
+                : "Unknown error";
+          errors.push(`Pair ${i + 1}: ${msg}`);
+        }
+      }
+
+      const noticeParts: string[] = [];
+      if (projectNameOut)
+        noticeParts.push(`${totalQueued} queued in “${projectNameOut}”`);
+      else noticeParts.push(`${totalQueued} queued`);
+      if (totalRejected > 0)
+        noticeParts.push(`${totalRejected} rejected by server`);
+      if (errors.length > 0)
+        noticeParts.push(`${errors.length} failed to upload`);
+      setSubmitNotice(noticeParts.join(" · "));
+      if (errors.length > 0) {
+        setSubmitError(errors.join(" | "));
+      }
+
       // Clear the queues so the user sees only fresh items. Revoke
       // every preview URL so we don't leak blob memory in the browser.
       for (const m of media) URL.revokeObjectURL(m.previewUrl);
@@ -535,7 +586,16 @@ export default function VoicePairPage() {
       setProjectName("");
       refresh();
     } catch (e) {
-      setSubmitError(e instanceof ApiError ? e.message : "Submit failed.");
+      // Outer catch — only reached for non-per-pair failures (e.g.
+      // pairs-building bug). Per-pair errors are caught above.
+      console.error("[voice-pair submit] outer failed:", e);
+      const msg =
+        e instanceof ApiError
+          ? `${e.message} (HTTP ${e.status})`
+          : e instanceof Error
+            ? `Submit failed: ${e.message}`
+            : "Submit failed.";
+      setSubmitError(msg);
     } finally {
       setSubmitting(false);
     }
