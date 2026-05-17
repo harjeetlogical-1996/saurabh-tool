@@ -2221,6 +2221,24 @@ function Library({
                   (r) => r.status === "done",
                 ),
               ).length;
+              // Count parents that have an in-flight render (queued or
+              // running). Used to show a live progress bar + count on
+              // the project header during bulk apply so the user can
+              // see how many videos are still cooking.
+              const renderingCount = group.jobs.filter((j) =>
+                (rendersByParent.get(j.id) ?? []).some(
+                  (r) => r.status === "queued" || r.status === "running",
+                ),
+              ).length;
+              const failedRenderCount = group.jobs.filter((j) =>
+                (rendersByParent.get(j.id) ?? []).some(
+                  (r) => r.status === "failed",
+                ),
+              ).length;
+              const totalForProgress = group.jobs.length;
+              const progressPct = totalForProgress > 0
+                ? Math.round((renderedCount / totalForProgress) * 100)
+                : 0;
               const zipUrl = group.projectId && renderedCount > 0
                 ? apiClient.projectZipUrl(group.projectId)
                 : null;
@@ -2229,15 +2247,33 @@ function Library({
                   key={group.projectId ?? "unfiled"}
                   className="rounded-lg border border-[var(--line)] bg-[var(--surface)]/40 p-3"
                 >
-                  <div className="flex items-center justify-between gap-3 mb-3 px-1 flex-wrap">
-                    <div className="flex items-center gap-3">
+                  <div className="flex items-center justify-between gap-3 mb-2 px-1 flex-wrap">
+                    <div className="flex items-center gap-3 flex-wrap">
                       <h3 className="text-[12px] font-mono uppercase tracking-[0.18em] text-[var(--accent)]">
                         {group.projectName}
                       </h3>
                       <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--muted)]">
                         {group.jobs.length} video{group.jobs.length === 1 ? "" : "s"}
-                        {renderedCount > 0 && ` · ${renderedCount} captioned`}
                       </span>
+                      {/* Live counters — visible as soon as a bulk apply
+                          starts so the user knows how many are still
+                          processing vs done vs failed. */}
+                      {renderedCount > 0 && (
+                        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--accent)]">
+                          ✓ {renderedCount} done
+                        </span>
+                      )}
+                      {renderingCount > 0 && (
+                        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-yellow-300 inline-flex items-center gap-1.5">
+                          <span className="h-1.5 w-1.5 rounded-full bg-yellow-300 animate-pulse" />
+                          {renderingCount} rendering
+                        </span>
+                      )}
+                      {failedRenderCount > 0 && (
+                        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-red-400">
+                          ✕ {failedRenderCount} failed
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 flex-wrap">
                       {/* "Apply style of 1st video" — visible only when
@@ -2275,6 +2311,30 @@ function Library({
                       )}
                     </div>
                   </div>
+                  {/* Project-level progress bar — only visible while
+                      any video in the project is rendering or some are
+                      already done. Gives the user a single glanceable
+                      indicator for the bulk-apply state. */}
+                  {(renderingCount > 0 || renderedCount > 0) && (
+                    <div className="mb-3 px-1">
+                      <div className="h-1.5 w-full rounded-full bg-black/40 overflow-hidden">
+                        <div
+                          className={`h-full transition-all ${
+                            renderingCount > 0
+                              ? "bg-yellow-300"
+                              : "bg-[var(--accent)]"
+                          }`}
+                          style={{ width: `${progressPct}%` }}
+                        />
+                      </div>
+                      <div className="mt-1 flex items-center justify-between text-[10px] font-mono text-[var(--muted)]">
+                        <span>
+                          {renderedCount} / {totalForProgress} captioned
+                        </span>
+                        <span>{progressPct}%</span>
+                      </div>
+                    </div>
+                  )}
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                     {group.jobs.map((j) => (
                       <TranscribedCard
