@@ -218,20 +218,52 @@ export default function BulkCaptionsPage() {
     setSubmitting(true);
     setSubmitError(null);
     setSubmitNotice(null);
+    // Chunk size — chosen so a typical batch of mobile/reel videos
+    // (10-50MB each) fits well within Cloud Run's request budget even
+    // on slow uplinks. 5 keeps each HTTP request small and recoverable;
+    // 50 files in one POST routinely hit timeouts / proxy limits.
+    const CHUNK_SIZE = 5;
     try {
-      const res = await apiClient.submitBulkCaptions(files, {
-        projectName: pickedProjectId ? undefined : projectName.trim() || undefined,
-        projectId: pickedProjectId || undefined,
-        language: language === "auto" ? undefined : language,
-      });
+      // First chunk creates the project (server generates an id when
+      // none is supplied). Subsequent chunks reuse that id so all the
+      // uploads end up grouped under the same project card.
+      let projectIdForBatch = pickedProjectId || undefined;
+      let totalQueued = 0;
+      let totalRejected = 0;
+      let resolvedProjectName: string | undefined;
+
+      const chunks: File[][] = [];
+      for (let i = 0; i < files.length; i += CHUNK_SIZE) {
+        chunks.push(files.slice(i, i + CHUNK_SIZE));
+      }
+      for (let i = 0; i < chunks.length; i++) {
+        setSubmitNotice(
+          `Uploading batch ${i + 1} of ${chunks.length}…`,
+        );
+        const res = await apiClient.submitBulkCaptions(chunks[i], {
+          projectName:
+            i === 0 && !projectIdForBatch
+              ? projectName.trim() || undefined
+              : undefined,
+          projectId: projectIdForBatch,
+          language: language === "auto" ? undefined : language,
+        });
+        if (!projectIdForBatch && res.projectId) {
+          projectIdForBatch = res.projectId;
+        }
+        if (res.projectName) resolvedProjectName = res.projectName;
+        totalQueued += res.summary.queued;
+        totalRejected += res.summary.rejected;
+      }
+
       setFiles([]);
       if (inputRef.current) inputRef.current.value = "";
       const parts: string[] = [];
-      if (res.summary.queued > 0) {
-        const proj = res.projectName ? ` in "${res.projectName}"` : "";
-        parts.push(`${res.summary.queued} transcribing${proj}`);
+      if (totalQueued > 0) {
+        const proj = resolvedProjectName ? ` in "${resolvedProjectName}"` : "";
+        parts.push(`${totalQueued} transcribing${proj}`);
       }
-      if (res.summary.rejected > 0) parts.push(`${res.summary.rejected} rejected`);
+      if (totalRejected > 0) parts.push(`${totalRejected} rejected`);
       setSubmitNotice(parts.join(" · ") || "Submitted.");
       setProjectName("");
       setPickedProjectId("");
