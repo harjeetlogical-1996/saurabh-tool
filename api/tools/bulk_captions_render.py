@@ -91,6 +91,9 @@ def handle(job_id: str, user_id: str, params: dict) -> None:
     bg_alpha = _safe_int(opts.get("bgAlpha"), 0, 255)
     font_size_override = _safe_int(opts.get("fontSize"), 12, 200)
     shadow_override = _safe_int(opts.get("shadow"), 0, 20)
+    animation = (opts.get("animation") or "none").lower()
+    if animation not in {"none", "pop"}:
+        animation = "none"
 
     width = int(parent.get("videoWidth") or 0)
     height = int(parent.get("videoHeight") or 0)
@@ -114,6 +117,7 @@ def handle(job_id: str, user_id: str, params: dict) -> None:
         style=style, position=position,
         uppercase_override=uppercase,
         pos_x_frac=pos_x_frac, pos_y_frac=pos_y_frac,
+        animation=animation,
         primary_color=primary_color,
         outline_color=outline_color,
         outline_width_override=outline_width_override,

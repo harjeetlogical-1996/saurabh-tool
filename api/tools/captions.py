@@ -878,6 +878,10 @@ def _write_ass(
     uppercase_override: bool = False,
     pos_x_frac: Optional[float] = None,
     pos_y_frac: Optional[float] = None,
+    # Word-level animation. "none" (default) keeps the original
+    # one-line-per-Dialogue rendering. "pop" pops each word in at its
+    # transcript-timed start using an ASS \t scale transform inline.
+    animation: str = "none",
     # ---- Per-caption customisation overrides ----
     # Each is optional: when None we use the picked style's preset value.
     # When supplied they replace the preset for this single render.
@@ -1012,6 +1016,44 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             start = _format_ass_time(line_start)
             end = _format_ass_time(float(line["end"]))
             events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
+        elif animation == "pop" and line.get("words"):
+            # Word-level pop animation: each word starts at 60% scale
+            # and animates to 100% over 180ms at its own transcript-
+            # timed start. Achieved with inline ASS \t (transform)
+            # tags — keeps event count = 1 per line (libass-friendly).
+            #
+            # \t timing is relative to the event start, in ms.
+            # \fscx/\fscy are percentages. \r resets to base style.
+            line_start = float(line["start"])
+            line_end = float(line["end"])
+            pop_dur_ms = 180  # snap duration; tweak if needed
+            parts: list[str] = []
+            for w in line["words"]:
+                ws = float(w["start"])
+                wt = (
+                    w["word"].upper() if use_upper
+                    else w["word"].lower() if use_lower
+                    else w["word"]
+                )
+                wt_safe = (
+                    wt.replace("{", "(").replace("}", ")").replace(",", "\\،")
+                )
+                # When in this line's timeline does this word pop in?
+                offset_ms = max(0, int(round((ws - line_start) * 1000)))
+                # Pop tag: start fully transparent + small, then snap
+                # to opaque + full size over pop_dur_ms. \alpha&HFF& is
+                # 255 transparent; \alpha&H00& is fully opaque. \r at
+                # end resets so the next word's tags don't inherit.
+                pop_tag = (
+                    f"{{\\alpha&HFF&\\fscx60\\fscy60"
+                    f"\\t({offset_ms},{offset_ms + pop_dur_ms},"
+                    f"\\alpha&H00&\\fscx100\\fscy100)}}"
+                )
+                parts.append(f"{pop_tag}{wt_safe}{{\\r}}")
+            text = pos_prefix + " ".join(parts)
+            start = _format_ass_time(line_start)
+            end = _format_ass_time(line_end)
+            events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
         else:
             start = _format_ass_time(float(line["start"]))
             end = _format_ass_time(float(line["end"]))
@@ -1132,6 +1174,12 @@ def handle(job_id: str, user_id: str, params: dict) -> None:
             shadow_override = max(0, min(20, int(shadow_override)))
         except (TypeError, ValueError):
             shadow_override = None
+    # Word-level animation. "none" (default) keeps the original
+    # one-line-per-Dialogue rendering. Other values mark each word
+    # with an ASS \t transform tag inside the line.
+    animation = (opts.get("animation") or "none").lower()
+    if animation not in {"none", "pop"}:
+        animation = "none"
 
     # 1. Decrypt user key (only needed if we don't have a cached transcript).
     raise_if_cancelled(job_id)
@@ -1192,6 +1240,7 @@ def handle(job_id: str, user_id: str, params: dict) -> None:
         style=style, position=position,
         uppercase_override=uppercase,
         pos_x_frac=pos_x_frac, pos_y_frac=pos_y_frac,
+        animation=animation,
         primary_color=primary_color,
         outline_color=outline_color,
         outline_width_override=outline_width_override,

@@ -360,6 +360,7 @@ export default function BulkCaptionsPage() {
         if (opts.fontSize !== null) payload.fontSize = opts.fontSize;
         if (opts.fontFamily) payload.fontFamily = opts.fontFamily;
         if (opts.shadow !== null) payload.shadow = opts.shadow;
+        if (opts.animation !== "none") payload.animation = opts.animation;
         const res = await apiClient.submitCaptionsRenderBulk(
           parentIds,
           payload,
@@ -658,6 +659,9 @@ type RenderOpts = {
   fontSize: number | null;
   fontFamily: string | null;
   shadow: number | null;
+  /** Word-level reveal animation. "none" = static line (default).
+   *  "pop" = each word scales + fades in at its transcript start. */
+  animation: "none" | "pop";
 };
 
 const DEFAULT_OPTS: RenderOpts = {
@@ -675,6 +679,7 @@ const DEFAULT_OPTS: RenderOpts = {
   fontSize: null,
   fontFamily: null,
   shadow: null,
+  animation: "none",
 };
 
 type EditorTab = "style" | "layout" | "text";
@@ -933,6 +938,7 @@ function Editor({
     fs: opts.fontSize,
     ff: opts.fontFamily,
     sh: opts.shadow,
+    an: opts.animation,
   });
   const firstFingerprintRef = useRef(optsFingerprint);
   useEffect(() => {
@@ -974,6 +980,7 @@ function Editor({
       if (opts.fontSize !== null) payload.fontSize = opts.fontSize;
       if (opts.fontFamily) payload.fontFamily = opts.fontFamily;
       if (opts.shadow !== null) payload.shadow = opts.shadow;
+      if (opts.animation !== "none") payload.animation = opts.animation;
       // Flip to original while the new render is in flight so the user
       // can drag/restyle without an outdated burned video flashing.
       setShowOriginal(true);
@@ -1314,6 +1321,40 @@ function Editor({
                   }
                   className="w-full h-9 accent-[var(--accent)]"
                 />
+              </Field>
+
+              {/* Word-level animation — POC: just None vs Pop. More
+                  styles (fade/slide/bounce) can be added once we like
+                  how Pop reads on real footage. */}
+              <Field label="Word animation">
+                <div className="flex gap-1.5">
+                  {([
+                    { v: "none", label: "None" },
+                    { v: "pop", label: "Pop · word-by-word" },
+                  ] as const).map((a) => {
+                    const active = opts.animation === a.v;
+                    return (
+                      <button
+                        key={a.v}
+                        type="button"
+                        onClick={() =>
+                          setOpts((o) => ({ ...o, animation: a.v }))
+                        }
+                        className={`flex-1 px-2 py-1.5 rounded-md border text-[11.5px] transition-colors ${
+                          active
+                            ? "border-[var(--accent)] bg-[var(--accent)]/5 text-white"
+                            : "border-[var(--line)] text-[var(--muted)] hover:text-white"
+                        }`}
+                      >
+                        {a.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-1.5 text-[10.5px] text-[var(--muted)] font-mono">
+                  Pop makes each word scale + fade in at its transcript
+                  start. Best on reels / TikTok-style edits.
+                </p>
               </Field>
             </div>
           )}
@@ -2431,6 +2472,7 @@ function optsFromRenderJob(job: Job): RenderOpts | null {
     fontSize: num(o.fontSize),
     fontFamily: str(o.fontFamily),
     shadow: num(o.shadow),
+    animation: o.animation === "pop" ? "pop" : "none",
   };
 }
 

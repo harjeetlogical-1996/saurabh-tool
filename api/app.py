@@ -652,6 +652,7 @@ def _normalize_caption_options(
     font_size: Optional[int] = None,
     font_family: Optional[str] = None,
     shadow: Optional[int] = None,
+    animation: Optional[str] = None,
 ) -> dict:
     if style not in {
         # Original 8
@@ -735,6 +736,10 @@ def _normalize_caption_options(
     sh = _int_in(shadow, 0, 20)
     if sh is not None:
         out["shadow"] = sh
+    if animation:
+        anim = str(animation).lower().strip()
+        if anim in {"none", "pop"}:
+            out["animation"] = anim
     return out
 
 
@@ -900,6 +905,7 @@ def submit_captions_render(
         font_size=payload.get("fontSize"),
         font_family=payload.get("fontFamily"),
         shadow=payload.get("shadow"),
+        animation=payload.get("animation"),
     )
 
     # Quota: captioning a transcribed video costs its full duration in
@@ -987,6 +993,7 @@ def submit_captions_render_bulk(
         font_size=payload.get("fontSize"),
         font_family=payload.get("fontFamily"),
         shadow=payload.get("shadow"),
+        animation=payload.get("animation"),
     )
 
     # First pass: validate every parent + total budget needed.
@@ -1246,6 +1253,7 @@ def submit_captions(
         font_size=payload.get("fontSize"),
         font_family=payload.get("fontFamily"),
         shadow=payload.get("shadow"),
+        animation=payload.get("animation"),
     )
 
     db_job_id = jobs.create_job(

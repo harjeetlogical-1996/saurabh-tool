@@ -272,6 +272,9 @@ export type CaptionRenderOpts = {
   fontFamily?: string;
   /** 0..20 px drop-shadow / glow radius. */
   shadow?: number;
+  /** Word-level animation. "none" disables; "pop" makes each word
+   *  scale + fade in at its transcript-timed start. */
+  animation?: "none" | "pop";
 };
 
 export type TranscriptResponse = {
