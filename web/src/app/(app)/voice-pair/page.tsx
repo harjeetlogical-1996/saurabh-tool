@@ -1561,10 +1561,16 @@ function VoicePairJobRow({
   //   3. Transcribe done, no burn yet      → 100% (waiting for user)
   //   4. Burn (caption render) running     → 0–100% from renderPct
   //      so the bar feels "fresh" for this new step
+  // No captions chain at all (admin cleared / never wired) — voice-
+  // pair render IS the final deliverable, so 100% the moment it's done.
+  const noCaptionsChain =
+    !captionsJob &&
+    (job.chainedCaptionsJobId === undefined ||
+      job.chainedCaptionsJobId === null);
   const pct = renderActive
     ? renderPct
     : vpRenderDone
-      ? capDone
+      ? capDone || noCaptionsChain
         ? 100
         : 50 + Math.round(capPct / 2)
       : Math.round(vpRenderPct / 2);
@@ -1581,7 +1587,16 @@ function VoicePairJobRow({
     }
     if (capFailed) return "Captioning failed — open captions to retry";
     if (capDone) return "Ready · open captions editor";
-    if (!captionsJob) return "Queueing captions…";
+    if (!captionsJob) {
+      // No captions chain at all — either the auto-chain was never
+      // wired up (older job), or admin cleared it. Voice-pair output
+      // is still usable; surface a neutral "ready" instead of pretending
+      // captions are about to start.
+      return job.chainedCaptionsJobId === undefined ||
+        job.chainedCaptionsJobId === null
+        ? "Ready · no captions"
+        : "Queueing captions…";
+    }
     return captionsJob.message || `Transcribing captions… ${capPct}%`;
   })();
   // "Done" from the user's POV means the WHOLE chain is done — that's
@@ -1592,21 +1607,28 @@ function VoicePairJobRow({
   const isRunning =
     job.status === "running" ||
     job.status === "queued" ||
-    (vpRenderDone && !capDone && !capFailed) ||
+    (vpRenderDone && !capDone && !capFailed && !noCaptionsChain) ||
     renderActive;
 
-  // Preview / Download are gated on the CAPTIONED render existing.
-  // The raw voice-pair mp4 is a partial state from the user's POV —
-  // showing it while captions are still transcribing/rendering led
-  // people to think the captions step had failed (they pressed
-  // Preview, saw the video without captions, and assumed something
-  // broke). Hide the buttons until the chain produces a burned video.
+  // Preview / Download resolution priority:
+  //   1. Captioned render exists → play the BURNED mp4 (matches the
+  //      "Preview" expectation when captions are part of the flow).
+  //   2. No captions chain at all (admin/server cleared it, or the
+  //      auto-chain never fired) → fall back to the raw voice-pair
+  //      mp4 so the user still gets their render out.
+  //   3. Captions chain is in-flight (transcribe/render still running)
+  //      → hide the buttons; otherwise users press Preview, see the
+  //      uncaptioned video, and assume captions are broken.
   const outputUrl = captionRender
     ? apiClient.jobOutputUrl(captionRender.id, {
         variant: "active",
         cacheKey: captionRender.updatedAt ?? captionRender.id,
       })
-    : null;
+    : !captionsJob && vpRenderDone
+      ? apiClient.jobOutputUrl(job.id, {
+          cacheKey: job.updatedAt ?? job.id,
+        })
+      : null;
 
   async function handleCancel() {
     setBusy("cancel");
