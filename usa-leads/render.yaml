@@ -1,0 +1,49 @@
+# Render.com blueprint. Push this repo, then in Render:
+#   New + -> Blueprint -> pick this repo -> it reads render.yaml.
+# Fill the env vars marked sync:false in the Render dashboard (they are secret).
+services:
+  - type: web
+    name: usa-leads
+    runtime: python
+    plan: free
+    rootDir: usa-leads
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py http
+    healthCheckPath: /mcp
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      # ---- secrets: set these in the Render dashboard ----
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+      - key: GMAIL_ADDRESS
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+      - key: MCP_AUTH_TOKEN
+        generateValue: true        # Render auto-generates a strong token
+      # ---- sender identity ----
+      - key: SENDER_NAME
+        value: "Saurabh Bhayana"
+      - key: SENDER_CITY
+        value: "Jaipur, India"
+      - key: BOOKING_LINK
+        value: ""
+      # ---- safety ----
+      - key: DAILY_SEND_CAP
+        value: "40"
+      - key: FULL_AUTO_REPLY
+        value: "false"
+      # ---- daily auto-run ----
+      - key: AUTO_RUN
+        value: "true"
+      - key: AUTO_CITY
+        value: "Austin TX"
+      - key: AUTO_CATEGORY
+        value: "plumbers"
+      - key: AUTO_FIND_LIMIT
+        value: "20"
+      - key: AUTO_SEND_LIMIT
+        value: "20"
+      - key: AUTO_HOUR_UTC
+        value: "14"
