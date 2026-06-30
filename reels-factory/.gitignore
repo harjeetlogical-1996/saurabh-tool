@@ -1,0 +1,9 @@
+.env
+pages.json
+.user_token.txt
+temp/
+output/
+__pycache__/
+*.pyc
+CLAUDE_AI_CONNECT.txt
+voice_samples/

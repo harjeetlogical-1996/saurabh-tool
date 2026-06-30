@@ -1,0 +1,25 @@
+# Render.com deploy config for Reels Factory.
+# Deploy: push this repo to GitHub, then in Render -> New -> Blueprint,
+# point at this repo. Fill the env vars (secrets) in the Render dashboard.
+services:
+  - type: web
+    name: reels-factory
+    runtime: docker
+    plan: starter            # 'free' works too but sleeps after inactivity
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /.well-known/oauth-authorization-server
+    envVars:
+      - key: PUBLIC_URL
+        sync: false          # set to your Render URL, e.g. https://reels-factory.onrender.com
+      - key: PEXELS_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: FB_APP_ID
+        sync: false
+      - key: FB_APP_SECRET
+        sync: false
+      - key: FB_PAGES_JSON
+        sync: false          # paste the whole pages.json content here (multi-page)

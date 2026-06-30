@@ -1,0 +1,27 @@
+{
+  "_comment": "Copy this file to pages.json and fill in your real pages. Each key is a short nickname you'll use in chat (e.g. 'cats', 'facts'). Run fb_verify_token to get each page's id + token. The first page is the default when no page is named.",
+
+  "cats": {
+    "page_id": "PUT_CAT_PAGE_ID_HERE",
+    "token": "PUT_CAT_PAGE_TOKEN_HERE",
+    "niche": "cats",
+    "default_voice": "en-US-AriaNeural",
+    "default_style": "facts"
+  },
+
+  "facts": {
+    "page_id": "PUT_FACTS_PAGE_ID_HERE",
+    "token": "PUT_FACTS_PAGE_TOKEN_HERE",
+    "niche": "facts",
+    "default_voice": "en-US-GuyNeural",
+    "default_style": "karaoke"
+  },
+
+  "quotes": {
+    "page_id": "PUT_QUOTES_PAGE_ID_HERE",
+    "token": "PUT_QUOTES_PAGE_TOKEN_HERE",
+    "niche": "quotes",
+    "default_voice": "en-GB-RyanNeural",
+    "default_style": "cinematic"
+  }
+}
