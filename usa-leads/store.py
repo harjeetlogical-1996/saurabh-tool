@@ -17,10 +17,24 @@ SENT_LOG_FILE = DATA / "sent_log.json"
 # Keys we recognise from .env / OS environment
 _ENV_KEYS = (
     "GOOGLE_PLACES_API_KEY",
+    "PAGESPEED_API_KEY",   # optional, free - real Google mobile speed score in audits
+    "YELP_API_KEY",
+    "COMPANY_NAME",        # your company shown in emails (e.g. digitograffi)
+    "EXPERIENCE_YEARS",    # e.g. "15+"
+    # --- mail (provider-agnostic; Hostinger/Gmail/Zoho/...) ---
+    "MAIL_ADDRESS",
+    "MAIL_PASSWORD",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "IMAP_HOST",
+    "IMAP_PORT",
+    "BREVO_API_KEY",       # if set, send via Brevo HTTP API (works on Render)
+    # --- legacy Gmail keys (still supported as fallback) ---
     "GMAIL_ADDRESS",
     "GMAIL_APP_PASSWORD",
     "SENDER_NAME",
     "SENDER_CITY",
+    "SUMMARY_EMAIL",       # where daily summaries go (default: the sending account)
     "BOOKING_LINK",
     "DAILY_SEND_CAP",
     "FULL_AUTO_REPLY",
@@ -32,6 +46,7 @@ _ENV_KEYS = (
     "AUTO_RUN",            # true => run the daily job in the background
     "AUTO_CITY",           # default city for daily find_leads, e.g. "Austin TX"
     "AUTO_CATEGORY",       # default category, e.g. "plumbers"
+    "AUTO_SOURCE",         # which lead source the daily job uses (osm/google/yelp/all)
     "AUTO_FIND_LIMIT",     # how many leads to pull per day
     "AUTO_SEND_LIMIT",     # how many outreach emails to send per day
     "AUTO_HOUR_UTC",       # hour (UTC, 0-23) to run the daily job
@@ -58,6 +73,10 @@ def load_env():
     # sensible defaults
     env.setdefault("SENDER_NAME", "Saurabh Bhayana")
     env.setdefault("SENDER_CITY", "Jaipur, India")
+    env.setdefault("SUMMARY_EMAIL", "")
+    env.setdefault("COMPANY_NAME", "digitograffi")
+    env.setdefault("EXPERIENCE_YEARS", "15+")
+    env.setdefault("PAGESPEED_API_KEY", "")
     env.setdefault("BOOKING_LINK", "")
     env.setdefault("DAILY_SEND_CAP", "40")
     env.setdefault("FULL_AUTO_REPLY", "false")
@@ -66,10 +85,26 @@ def load_env():
     env.setdefault("AUTO_RUN", "false")
     env.setdefault("AUTO_CITY", "")
     env.setdefault("AUTO_CATEGORY", "")
+    env.setdefault("AUTO_SOURCE", "osm")
     env.setdefault("AUTO_FIND_LIMIT", "20")
     env.setdefault("AUTO_SEND_LIMIT", "20")
     env.setdefault("AUTO_HOUR_UTC", "14")  # ~9am US Eastern
     return env
+
+
+def mail_address(env: dict) -> str:
+    return env.get("MAIL_ADDRESS") or env.get("GMAIL_ADDRESS") or ""
+
+
+def require_mail(env: dict):
+    """Ensure a mail address + password are configured (MAIL_* or GMAIL_* fallback)."""
+    addr = env.get("MAIL_ADDRESS") or env.get("GMAIL_ADDRESS")
+    pw = env.get("MAIL_PASSWORD") or env.get("GMAIL_APP_PASSWORD")
+    if not addr or not pw:
+        raise RuntimeError(
+            "Mail not configured. Set MAIL_ADDRESS + MAIL_PASSWORD (and SMTP_HOST/"
+            "IMAP_HOST) in .env. See .env.example."
+        )
 
 
 def require(env: dict, *keys):
@@ -122,7 +157,9 @@ def find_lead_by_email(email: str):
 
 
 def new_lead_record(place_id, name, city, website="", phone="",
-                    category="", has_website=False, service_pitch="website"):
+                    category="", has_website=False, service_pitch="website",
+                    address="", rating=None, rating_count=None, maps_url="",
+                    hours="", source=""):
     return {
         "place_id": place_id,
         "name": name,
@@ -132,6 +169,13 @@ def new_lead_record(place_id, name, city, website="", phone="",
         "phone": phone,
         "category": category,
         "has_website": has_website,
+        # extra data captured at discovery (Claude uses this for personalization)
+        "address": address,
+        "rating": rating,
+        "rating_count": rating_count,
+        "maps_url": maps_url,
+        "hours": hours,
+        "source": source,
         "status": "new",          # new->emailed->replied->drafted->answered->booked
         "service_pitch": service_pitch,
         "last_outreach": None,

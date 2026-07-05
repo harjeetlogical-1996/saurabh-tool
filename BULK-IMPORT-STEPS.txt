@@ -1,0 +1,69 @@
+================================================================
+  BUY FROM BEST - BULK IMPORT (20 articles, 10 days, 2/day)
+================================================================
+
+KYA MIL RAHA HAI (2 files):
+  1. media-upload.zip          -> 20 featured images (optimized)
+  2. bulk-articles-import.xml  -> 20 articles (scheduled + SEO + auto image)
+
+SCHEDULE: articles 28 June se 7 July tak, har din 2 (subah + shaam).
+  Author: Jordan (10) + Mia (10). Sab "Scheduled" rahenge aur apne din
+  apne aap publish ho jayenge. Aaj kuch nahi dikhega - wahi sahi hai.
+
+----------------------------------------------------------------
+STEP 1 - IMAGES UPLOAD KARO (pehle yeh, taaki auto-attach ho)
+----------------------------------------------------------------
+Hostinger hPanel -> File Manager -> /public_html/wp-content/uploads/
+  - Yahan ek NAYA folder banao:  bfb-articles
+  - Us folder ke andar jaao: /public_html/wp-content/uploads/bfb-articles/
+  - media-upload.zip upload karo -> Extract here.
+  - Ab 20 .jpg files seedhe is folder me honi chahiye:
+       /wp-content/uploads/bfb-articles/beginner-dirt-bikes-featured.jpg  (etc.)
+  - zip file delete kar do.
+
+  CHECK: browser me yeh URL khol ke dekho image aati hai ya nahi:
+    https://buyfrombest.com/wp-content/uploads/bfb-articles/beginner-dirt-bikes-featured.jpg
+  Agar image dikhe -> sahi hai. Agar 404 -> folder/path galat hai, theek karo.
+
+----------------------------------------------------------------
+STEP 2 - XML IMPORT KARO
+----------------------------------------------------------------
+buyfrombest.com/wp-admin -> Tools -> Import -> WordPress -> Run Importer
+  (Pehli baar ho to "Install Now" dabao, phir Run Importer.)
+  - "Choose File" -> bulk-articles-import.xml -> Upload file and import.
+
+  AUTHOR SCREEN:
+  - Har author ke saamne dropdown se apna existing author chuno:
+       jordan  -> Jordan (jo author live pe hai)
+       mia     -> Mia (jo author live pe hai)
+    (Ya naya banane do, chalega. Lekin existing chuno to clean rahega.)
+
+  IMPORTANT CHECKBOX:
+  - "Download and import file attachments" -> YEH TICK KARO.
+    Isse WordPress images ko Media Library me le aayega aur
+    har article ki featured image apne aap set ho jayegi.
+
+  - Submit. 1-2 min lagega.
+
+----------------------------------------------------------------
+STEP 3 - CHECK KARO
+----------------------------------------------------------------
+wp-admin -> Posts -> "Scheduled" tab.
+  - 20 articles "Scheduled" dikhne chahiye, dates 28 Jun se 7 Jul.
+  - Kisi ek pe hover -> Preview -> content + featured image dono aaye?
+  - Media -> Library me 20 nayi images honi chahiye.
+
+  Agar featured image kisi article pe nahi lagi:
+   -> Us article -> Edit -> Featured image -> Set -> Media Library se
+      uski image (slug ke naam se) choose karo -> Update.
+   (Yeh tab hota hai jab STEP 1 ka URL 404 tha. Pehle woh theek karo.)
+
+----------------------------------------------------------------
+BAS. Aage kuch nahi karna.
+----------------------------------------------------------------
+- Har din 2 article apne aap LIVE ho jayenge (28 Jun se 7 Jul).
+- Internal links (dusre articles + Store Finder) sab already lage hain.
+- External authority links bhi lage hain.
+- 0 em-dash, full schema, SEO title + meta description sab set hai.
+
+NOTE: Ye 20 article AAPKE existing 26 se alag (naye topics) hain. Koi duplicate nahi.

@@ -24,6 +24,12 @@ Thumbs.db
 .env.local
 .env.development.local
 .env.production.local
+wp-config.local.json
+sftp-config.local.json
+*.secret.json
+wp-mcp/server.log
+wp-mcp/ngrok.log
+wp-mcp/.venv/
 
 # Generated user data — these live on Cloud Run ephemeral disk anyway
 api/uploads/
@@ -41,3 +47,8 @@ yarn-error.log*
 
 # Local dev scripts
 api/_check_*.py
+
+# wp-mcp local secrets (never commit)
+wp-mcp/.oauth_secret.txt
+wp-mcp/*.secret
+client_secret_*.apps.googleusercontent.com.json

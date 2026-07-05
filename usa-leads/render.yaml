@@ -6,22 +6,39 @@ services:
     name: usa-leads
     runtime: python
     plan: free
-    rootDir: usa-leads
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py http
-    healthCheckPath: /mcp
+    # no healthCheckPath: the /mcp endpoint requires the Bearer token, so an
+    # unauthenticated health check would 401 and mark the deploy unhealthy.
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.6"
       # ---- secrets: set these in the Render dashboard ----
-      - key: GOOGLE_PLACES_API_KEY
+      # Mail account is required (sending + reading). Source keys are OPTIONAL:
+      # osm + yellowpages sources work with no key at all.
+      - key: MAIL_ADDRESS
         sync: false
-      - key: GMAIL_ADDRESS
+      - key: MAIL_PASSWORD
         sync: false
-      - key: GMAIL_APP_PASSWORD
+      - key: GOOGLE_PLACES_API_KEY   # optional
         sync: false
+      - key: YELP_API_KEY            # optional
+        sync: false
+      # mail servers (Hostinger defaults; change for another provider)
+      - key: SMTP_HOST
+        value: "smtp.hostinger.com"
+      - key: SMTP_PORT
+        value: "465"
+      - key: IMAP_HOST
+        value: "imap.hostinger.com"
+      - key: IMAP_PORT
+        value: "993"
       - key: MCP_AUTH_TOKEN
-        generateValue: true        # Render auto-generates a strong token
+        generateValue: true        # Render auto-generates a strong token (fallback)
+      # PUBLIC_URL turns on OAuth (what Claude Desktop connectors expect).
+      # Must match your Render service URL exactly.
+      - key: PUBLIC_URL
+        value: "https://usa-leads.onrender.com"
       # ---- sender identity ----
       - key: SENDER_NAME
         value: "Saurabh Bhayana"
@@ -41,6 +58,8 @@ services:
         value: "Austin TX"
       - key: AUTO_CATEGORY
         value: "plumbers"
+      - key: AUTO_SOURCE
+        value: "osm"
       - key: AUTO_FIND_LIMIT
         value: "20"
       - key: AUTO_SEND_LIMIT

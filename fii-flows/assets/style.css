@@ -1,0 +1,173 @@
+/* FII Flows — front-end styles */
+
+.fiif-answer {
+	background: #f0f7ff;
+	border-left: 4px solid #2563eb;
+	padding: 14px 18px;
+	margin: 0 0 18px;
+	border-radius: 6px;
+	font-size: 16px;
+	line-height: 1.6;
+}
+
+.fiif-table {
+	width: 100%;
+	border-collapse: collapse;
+	margin: 0 0 12px;
+	font-size: 14px;
+}
+.fiif-table th,
+.fiif-table td {
+	border: 1px solid #e5e7eb;
+	padding: 8px 10px;
+	text-align: right;
+}
+.fiif-table th:first-child,
+.fiif-table td:first-child,
+.fiif-table td:nth-child(2) {
+	text-align: left;
+}
+.fiif-table thead th {
+	background: #f9fafb;
+	font-weight: 600;
+}
+.fiif-table tbody tr:nth-child(even) {
+	background: #fcfcfd;
+}
+
+.fiif-pos { color: #16a34a; font-weight: 600; }
+.fiif-neg { color: #dc2626; font-weight: 600; }
+
+.fiif-updated {
+	font-size: 12px;
+	color: #6b7280;
+	margin: 4px 0 24px;
+}
+
+.fiif-empty {
+	background: #fff7ed;
+	border: 1px dashed #fdba74;
+	padding: 14px;
+	border-radius: 6px;
+	color: #9a3412;
+}
+
+.fiif-chart-wrap {
+	position: relative;
+	height: 340px;
+	margin: 0 0 24px;
+}
+
+/* Mood meter */
+.fiif-mood {
+	display: inline-flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 18px 28px;
+	border-radius: 12px;
+	background: #f9fafb;
+	border: 2px solid #e5e7eb;
+	margin: 0 0 20px;
+}
+.fiif-mood-label { font-size: 13px; color: #6b7280; text-transform: uppercase; letter-spacing: .5px; }
+.fiif-mood-value { font-size: 32px; font-weight: 800; margin-top: 4px; }
+.fiif-mood.fiif-pos { border-color: #16a34a; background: #f0fdf4; }
+.fiif-mood.fiif-neg { border-color: #dc2626; background: #fef2f2; }
+
+/* Directory filter */
+.fiif-dir-filter {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	margin: 0 0 16px;
+}
+.fiif-dir-filter input[type="text"],
+.fiif-dir-filter select {
+	padding: 8px 10px;
+	border: 1px solid #d1d5db;
+	border-radius: 6px;
+	font-size: 14px;
+}
+.fiif-dir-filter input[type="text"] { flex: 1; min-width: 200px; }
+.fiif-dir-filter button {
+	padding: 8px 18px;
+	background: #2563eb;
+	color: #fff;
+	border: 0;
+	border-radius: 6px;
+	cursor: pointer;
+}
+
+.fiif-pager { margin: 8px 0 24px; display: flex; gap: 16px; }
+.fiif-pager a { text-decoration: none; font-weight: 600; }
+
+/* Stats grid */
+.fiif-stats-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 14px;
+	margin: 0 0 22px;
+}
+.fiif-stat-box {
+	background: #fff;
+	border: 1px solid #e5e7eb;
+	border-radius: 12px;
+	padding: 16px 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.fiif-sb-label { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+.fiif-sb-value { font-size: 22px; font-weight: 800; }
+.fiif-sb-sub { font-size: 12px; color: #6b7280; }
+
+/* Streak badge */
+.fiif-streak {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	background: #f9fafb;
+	border: 1px solid #e5e7eb;
+	border-left-width: 4px;
+	border-radius: 12px;
+	padding: 14px 18px;
+	font-size: 15.5px;
+	margin: 0;
+}
+.fiif-streak.fiif-pos { border-left-color: #16a34a; background: #f0fdf4; }
+.fiif-streak.fiif-neg { border-left-color: #dc2626; background: #fef2f2; }
+.fiif-streak-ico {
+	width: 40px; height: 40px; border-radius: 10px;
+	display: inline-flex; align-items: center; justify-content: center;
+	flex-shrink: 0;
+}
+.fiif-streak.fiif-pos .fiif-streak-ico { background: #dcfce7; color: #16a34a; }
+.fiif-streak.fiif-neg .fiif-streak-ico { background: #fee2e2; color: #dc2626; }
+.fiif-streak strong { color: #0f172a; }
+
+/* Sector table */
+.fiif-sectors td { text-align: right; }
+
+/* Calendar heatmap */
+.fiif-cal {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin: 0 0 10px;
+}
+.fiif-cal-cell {
+	width: 18px; height: 18px;
+	border-radius: 4px;
+	cursor: pointer;
+	transition: transform .1s;
+}
+.fiif-cal-cell:hover { transform: scale(1.3); outline: 1px solid #0f172a; }
+.fiif-cal-legend {
+	font-size: 12.5px; color: #6b7280;
+	display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+}
+.fiif-cal-key { display: inline-flex; align-items: center; gap: 6px; }
+.fiif-swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.fiif-swatch.buy { background: #16a34a; }
+.fiif-swatch.sell { background: #dc2626; }
+.fiif-cal-hint { color: #94a3b8; margin-left: auto; }

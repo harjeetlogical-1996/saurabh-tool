@@ -1,0 +1,7 @@
+fastmcp>=3.4.0
+edge-tts>=7.0.0
+requests>=2.31.0
+# reused from ../reels-factory (voice, captions, ffmpeg assembly, youtube):
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.100.0
+# ffmpeg must be installed on the system and on PATH.

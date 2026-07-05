@@ -23,6 +23,8 @@ import helpers
 import fb_manager as fb
 import finance
 import research
+import youtube_manager as yt
+import stocks
 
 mcp = FastMCP("reels-factory")
 ENV = helpers.load_env()
@@ -279,6 +281,366 @@ def make_quote_reel(quote: str, author: str = "", visual_keyword: str = "nature 
         spoken = f"{spoken} ... {author}"
     return make_reel(spoken, visual_keyword, title, voice,
                      style="quotes", music=True, music_mood=music_mood)
+
+
+@mcp.tool()
+def make_stock_reel(market: str = "US", n: int = 5, title: str = "",
+                    voice: str = "", music: bool = True,
+                    hindi: bool = None, date_override: str = "") -> str:
+    """
+    Daily STOCK MOVERS reel: fetches LIVE top gainers + losers and builds an
+    animated board with a voiceover. Returns the reel path (review then post).
+
+    market: US | INDIA | CRYPTO
+    n:      how many gainers and losers (default 5 each)
+    title:  board title (default auto, e.g. "TOP MOVERS TODAY")
+    voice:  voice id; empty = auto (India -> Hindi voice, US/CRYPTO -> English)
+    music:  background music under the voice
+    hindi:  force Hindi (True) or English (False); None = auto by market
+
+    Voice language: INDIA defaults to HINDI, US/CRYPTO to ENGLISH.
+    """
+    stamp = _stamp()
+    data = stocks.market_movers(market, n)
+    g, l = data["gainers"], data["losers"]
+    if not g and not l:
+        return f"No data for market '{market}'. Try US | INDIA | CRYPTO."
+
+    mkt_label = {"US": "US STOCKS", "INDIA": "INDIA - NSE",
+                 "CRYPTO": "CRYPTO"}.get(market.upper(), market.upper())
+    title = title or "TOP MOVERS TODAY"
+
+    # decide language
+    if hindi is None:
+        hindi = (market.upper() == "INDIA")
+    cur = "rupees" if hindi else "percent"
+
+    voice = voice or "gemini:deep"
+    fb_voice = "hi-IN-MadhurNeural" if hindi else "en-US-GuyNeural"
+    import time as _t
+    date_str = date_override or _t.strftime("%d %b %Y")
+
+    def speak_names(items):
+        # read EVERY symbol + its percent, fast & punchy
+        parts = []
+        for it in items:
+            pc = abs(it["change"])
+            if hindi:
+                parts.append(f"{it['symbol']}, {pc:.0f} percent.")
+            else:
+                parts.append(f"{it['symbol']}, {pc:.0f} percent.")
+        return " ".join(parts)
+
+    # --- SCENE 1: GAINERS (3-4s+, all names spoken) ---
+    if hindi:
+        g_say = "Aaj ke top gainers. " + speak_names(g)
+        l_say = "Ab top losers. " + speak_names(l) + " Follow karo daily updates ke liye."
+        g_head, l_head = "TOP GAINERS", "TOP LOSERS"
+    else:
+        g_say = "Today's top gainers. " + speak_names(g)
+        l_say = "Now the top losers. " + speak_names(l) + " Follow for daily market updates."
+        g_head, l_head = "TOP GAINERS", "TOP LOSERS"
+
+    clips = []
+    for tag, items, say, head, pos in [
+        ("g", g, g_say, g_head, True),
+        ("l", l, l_say, l_head, False),
+    ]:
+        if not items:
+            continue
+        vp = helpers.TEMP / f"stk_{tag}_{stamp}.mp3"
+        try:
+            helpers.make_voice(say, vp, voice, gemini_key=ENV.get("GEMINI_API_KEY", ""))
+        except Exception:
+            helpers.make_voice(say, vp, fb_voice)
+        helpers.pad_audio_tail(vp, seconds=0.6)
+        sdur = max(4.0, helpers.get_audio_duration(vp))  # min 4s per section
+        vis = helpers.TEMP / f"stk_vis_{tag}_{stamp}.mp4"
+        finance.stock_section(items, vis, duration=sdur, heading=head,
+                              market=mkt_label, date_str=date_str, positive=pos)
+        cap = helpers.TEMP / f"stk_cap_{tag}_{stamp}.ass"
+        helpers.build_captions("", sdur, cap, style="facts")
+        clip = helpers.TEMP / f"stk_clip_{tag}_{stamp}.mp4"
+        helpers.build_reel([vis], vp, cap, clip, music=None)
+        clips.append(clip)
+
+    # join gainers + losers scenes
+    out = helpers.OUTPUT / f"stock_{market.lower()}_{stamp}.mp4"
+    joined = helpers.TEMP / f"stk_join_{stamp}.mp4"
+    helpers.concat_clips(clips, joined)
+    track = helpers.pick_music("calm") if music else None
+    if track:
+        helpers.mix_music_over(joined, track, out, volume=0.16)
+    else:
+        joined.replace(out)
+    try:
+        helpers.make_thumbnail(out, at_seconds=2.0)
+    except Exception:
+        pass
+    total = helpers.get_audio_duration(out)
+    lang = "Hindi" if hindi else "English"
+    return (f"STOCK REEL READY (NOT posted — review first):\n"
+            f"  File: {out}\n  {market} | gainers+losers scenes | {lang} voice | {total:.0f}s\n"
+            f"  -> Post: post_existing_reel(\"{out.name}\", page=\"<nick>\")\n"
+            f"  -> YouTube: yt_upload(\"{out}\", title=..., channel=\"marketwatchpro\")")
+
+
+@mcp.tool()
+def make_market_wrap(market: str = "INDIA", n: int = 5, hindi: bool = None,
+                     music: bool = True, date_override: str = "") -> str:
+    """
+    LONG-FORM 'Daily Market Wrap' video (3-5 min) for YouTube (not a Short).
+    Sections: intro card -> market indices -> top gainers -> top losers ->
+    outro. Each section has its own narration + visual, joined into one video.
+
+    market:        INDIA | US
+    n:             gainers/losers count
+    hindi:         force Hindi; None = auto (INDIA->Hindi, US->English)
+    date_override: fixed date label (e.g. "01 Jul 2026"); empty = today
+    Returns the file path (review, then upload with yt_upload).
+    """
+    stamp = _stamp()
+    if hindi is None:
+        hindi = (market.upper() == "INDIA")
+    voice = "gemini:deep" if not hindi else "gemini:warm"
+    fb_voice = "hi-IN-MadhurNeural" if hindi else "en-US-GuyNeural"
+    import time as _t
+    date_str = date_override or _t.strftime("%d %b %Y")
+    mkt_label = "INDIA - NSE" if market.upper() == "INDIA" else "US STOCKS"
+
+    idx = stocks.indices(market)
+    data = stocks.market_movers(market, n)
+    g, l = data["gainers"], data["losers"]
+    news = stocks.market_news(market, 5)
+
+    def names(items, pct_key="change"):
+        return " ".join(f"{it.get('symbol', it.get('name'))}, "
+                        f"{abs(it[pct_key]):.0f} percent." for it in items)
+
+    if hindi:
+        intro_say = (
+            f"Namaste doston, aur swagat hai aaj ke market wrap me. Aaj hai "
+            f"{date_str}. Is video me hum dekhenge ki aaj market me kya hua, "
+            "kaunse indices kaise band hue, kaunse stocks sabse zyada chadhe "
+            "aur gire, aur din ki sabse badi khabrein kya rahi. Toh chaliye "
+            "shuru karte hain, bina kisi deri ke.")
+        idx_say = (
+            "Sabse pehle baat karte hain major indices ki, jo poore market ka "
+            "mood batate hain. " +
+            " ".join(f"{i['name']} {'chadha' if i['change']>=0 else 'gira'} "
+                     f"{abs(i['change']):.1f} percent, aur band hua "
+                     f"{i['price']:,.0f} par." for i in idx) +
+            " In numbers se pata chalta hai ki aaj overall market ka rukh "
+            f"{'positive' if (idx and idx[0]['change']>=0) else 'thoda dabaav me'} "
+            "raha.")
+        g_say = (
+            "Ab baat karte hain aaj ke top gainers ki, yaani wo stocks jinhone "
+            "sabse zyada return diya. " +
+            " ".join(f"Sabse aage raha {gg['symbol']}, jo chadha "
+                     f"{abs(gg['change']):.0f} percent, "
+                     f"aur ab trade kar raha hai {gg.get('price',0):,.0f} par."
+                     for gg in g) +
+            " Agar aapke portfolio me in me se koi stock hai, toh aaj ka din "
+            "aapke liye accha raha hoga.")
+        l_say = (
+            "Lekin har din sab kuch upar nahi jaata. Ab dekhte hain aaj ke top "
+            "losers, wo stocks jinme sabse zyada girawat aayi. " +
+            " ".join(f"{ll['symbol']} gira {abs(ll['change']):.0f} percent, "
+                     f"aur ab hai {ll.get('price',0):,.0f} par." for ll in l) +
+            " In stocks par nazar rakhna zaroori hai, kyunki girawat kabhi "
+            "opportunity bhi ho sakti hai.")
+        news_say = (
+            "Ab dekhte hain aaj ki sabse badi market khabrein, jinhone "
+            "investors ka dhyan kheencha. " +
+            " ".join(f"{h}." for h in news[:4]) +
+            " In khabron ka asar aane wale dinon me market par dikh sakta hai.")
+        out_say = (
+            "Toh doston, ye tha aaj ka poora market wrap. Umeed hai ye video "
+            "aapke liye useful raha hoga. Agar aapko ye pasand aaya, toh like "
+            "zaroor karein, channel ko subscribe karein, aur bell icon dabana "
+            "na bhoolein taaki aapko har din ka market update sabse pehle mile. "
+            "Milte hain kal, ek naye market wrap ke saath. Tab tak, invest "
+            "smartly, aur apna dhyan rakhein.")
+    else:
+        intro_say = (
+            f"Welcome back, everyone, to today's market wrap. Today is "
+            f"{date_str}. In this video, we will cover how the major indices "
+            "closed, which stocks were the biggest gainers and losers, and the "
+            "top headlines that moved the markets today. So let us dive right "
+            "in, without any delay.")
+        idx_say = (
+            "Let us start with the major indices, which set the tone for the "
+            "entire market. " +
+            " ".join(f"{i['name']} closed {'up' if i['change']>=0 else 'down'} "
+                     f"{abs(i['change']):.1f} percent, at "
+                     f"{i['price']:,.0f}." for i in idx) +
+            " Overall, the market sentiment today was "
+            f"{'positive' if (idx and idx[0]['change']>=0) else 'under some pressure'}.")
+        g_say = (
+            "Now, let us look at today's top gainers, the stocks that delivered "
+            "the strongest returns. " +
+            " ".join(f"Leading the pack was {gg['symbol']}, up "
+                     f"{abs(gg['change']):.0f} percent, now trading at "
+                     f"{gg.get('price',0):,.0f}." for gg in g) +
+            " If any of these are in your portfolio, today was a good day for you.")
+        l_say = (
+            "But not everything goes up. Here are today's top losers, the "
+            "stocks that saw the steepest declines. " +
+            " ".join(f"{ll['symbol']} fell {abs(ll['change']):.0f} percent, now "
+                     f"at {ll.get('price',0):,.0f}." for ll in l) +
+            " Keep an eye on these names, because a dip can sometimes be an "
+            "opportunity.")
+        news_say = (
+            "Now let us look at the biggest market headlines that caught "
+            "investors' attention today. " +
+            " ".join(f"{h}." for h in news[:4]) +
+            " These stories could shape the markets in the days ahead.")
+        out_say = (
+            "So that wraps up today's market. I hope you found this useful. If "
+            "you did, please hit the like button, subscribe to the channel, and "
+            "turn on the bell so you never miss a daily update. See you tomorrow "
+            "with another market wrap. Until then, invest smartly, and take care.")
+
+    def build_section(tag, say, visual_fn):
+        vp = helpers.TEMP / f"mw_{tag}_{stamp}.mp3"
+        try:
+            helpers.make_voice(say, vp, voice, gemini_key=ENV.get("GEMINI_API_KEY", ""))
+        except Exception:
+            helpers.make_voice(say, vp, fb_voice)
+        helpers.pad_audio_tail(vp, seconds=0.7)
+        sdur = max(3.0, helpers.get_audio_duration(vp))
+        vis = helpers.TEMP / f"mw_vis_{tag}_{stamp}.mp4"
+        visual_fn(vis, sdur)
+        cap = helpers.TEMP / f"mw_cap_{tag}_{stamp}.ass"
+        helpers.build_captions("", sdur, cap, style="facts")
+        clip = helpers.TEMP / f"mw_clip_{tag}_{stamp}.mp4"
+        helpers.build_reel([vis], vp, cap, clip, music=None)
+        return clip
+
+    clips = []
+    clips.append(build_section("intro", intro_say,
+        lambda o, d: finance.title_card(
+            "MARKET WRAP", mkt_label, o, duration=d, date_str=date_str)))
+    if idx:
+        clips.append(build_section("idx", idx_say,
+            lambda o, d: finance.indices_board(idx, o, duration=d,
+                heading="MARKET INDICES", market=mkt_label, date_str=date_str)))
+    if g:
+        clips.append(build_section("gain", g_say,
+            lambda o, d: finance.stock_section(g, o, duration=d,
+                heading="TOP GAINERS", market=mkt_label, date_str=date_str,
+                positive=True)))
+    if l:
+        clips.append(build_section("lose", l_say,
+            lambda o, d: finance.stock_section(l, o, duration=d,
+                heading="TOP LOSERS", market=mkt_label, date_str=date_str,
+                positive=False)))
+    if news:
+        clips.append(build_section("news", news_say,
+            lambda o, d: finance.news_board(news, o, duration=d,
+                heading="TOP MARKET NEWS", market=mkt_label, date_str=date_str)))
+    clips.append(build_section("outro", out_say,
+        lambda o, d: finance.title_card(
+            "THANKS FOR WATCHING", "Like & Subscribe", o, duration=d)))
+
+    out = helpers.OUTPUT / f"wrap_{market.lower()}_{stamp}.mp4"
+    joined = helpers.TEMP / f"mw_join_{stamp}.mp4"
+    helpers.concat_clips(clips, joined)
+    track = helpers.pick_music("calm") if music else None
+    if track:
+        helpers.mix_music_over(joined, track, out, volume=0.12)
+    else:
+        joined.replace(out)
+    try:
+        helpers.make_thumbnail(out, at_seconds=1.5)
+    except Exception:
+        pass
+    total = helpers.get_audio_duration(out)
+    lang = "Hindi" if hindi else "English"
+    return (f"MARKET WRAP READY (long video, NOT posted):\n"
+            f"  File: {out}\n  {market} | {len(clips)} sections | {lang} | {total:.0f}s\n"
+            f"  -> YouTube: yt_upload(\"{out}\", title=..., channel=\"marketwatchpro\")")
+
+
+@mcp.tool()
+def make_silent_quote(quote: str, visual_keyword: str = "nature cinematic dark",
+                      author: str = "", title: str = "quote",
+                      duration: float = 9.0, music_mood: str = "cinematic",
+                      brand: str = "", outro: str = "Follow for more.") -> str:
+    """
+    STYLE A quote reel: the WHOLE quote shown on screen at once (big bold
+    centered text) with MUSIC ONLY — no voiceover. The viewer reads it at
+    their own pace (aesthetic / "read it yourself" style). Returns the path.
+
+    quote:          the full quote text (shown on screen)
+    visual_keyword: cinematic stock background search
+    author:         optional author shown under the quote
+    title:          filename label
+    duration:       total reel length in seconds (default 9; 8-14 good)
+    music_mood:     background music mood (e.g. "cinematic", "calm")
+    brand:          small handle watermark
+    outro:          CTA shown in the last 2s
+    """
+    stamp = _stamp()
+    bg = helpers.TEMP / f"qbg_{stamp}.mp4"
+    helpers.fetch_stock_video(visual_keyword, ENV.get("PEXELS_API_KEY", ""), bg)
+    track = helpers.pick_music(music_mood)
+    safe = "".join(c for c in title if c.isalnum() or c in "-_")[:40] or "quote"
+    out = helpers.OUTPUT / f"{safe}_{stamp}.mp4"
+    helpers.build_silent_quote_reel(bg, quote, out, duration=duration,
+                                    music=track, author=author, brand=brand,
+                                    outro=outro)
+    try:
+        helpers.make_thumbnail(out, at_seconds=duration / 2)
+    except Exception:
+        pass
+    return (f"SILENT QUOTE REEL READY (NOT posted — review first):\n"
+            f"  File: {out}\n  {duration:.0f}s | music-only | no voice\n"
+            f"  -> To publish: post_existing_reel(\"{out.name}\", page=\"<nick>\")")
+
+
+@mcp.tool()
+def make_quote_voiced(on_screen_quote: str, voiceover_script: str,
+                      visual_keyword: str = "nature cinematic dark",
+                      author: str = "", title: str = "quote",
+                      voice: str = "gemini:deep", music_mood: str = "cinematic",
+                      brand: str = "", outro: str = "Follow for more.") -> str:
+    """
+    SEPARATED quote reel (best for stoic/discipline): the ON-SCREEN text is a
+    short punchy quote, while the VOICEOVER narrates a DIFFERENT, longer script.
+    The voiceover text is NOT shown on screen. Deep voice + cinematic music.
+
+    on_screen_quote:  the short quote SHOWN on screen (what viewers read)
+    voiceover_script: the (different) longer text the narrator SAYS (not shown)
+    visual_keyword:   cinematic stock background search
+    author:           optional author under the quote
+    title:            filename label
+    voice:            voice id (default gemini:deep — slow calm male)
+    music_mood:       background music mood (default "cinematic")
+    brand:            small handle watermark
+    outro:            CTA shown in the last 2s
+    """
+    stamp = _stamp()
+    vp = helpers.TEMP / f"qv_{stamp}.mp3"
+    try:
+        helpers.make_voice(voiceover_script, vp, voice,
+                           gemini_key=ENV.get("GEMINI_API_KEY", ""))
+    except Exception:
+        helpers.make_voice(voiceover_script, vp, "en-US-GuyNeural")
+    bg = helpers.TEMP / f"qvbg_{stamp}.mp4"
+    helpers.fetch_stock_video(visual_keyword, ENV.get("PEXELS_API_KEY", ""), bg)
+    track = helpers.pick_music(music_mood)
+    safe = "".join(c for c in title if c.isalnum() or c in "-_")[:40] or "quote"
+    out = helpers.OUTPUT / f"{safe}_{stamp}.mp4"
+    helpers.build_voiced_quote_reel(bg, on_screen_quote, vp, out, music=track,
+                                    author=author, brand=brand, outro=outro)
+    try:
+        helpers.make_thumbnail(out, at_seconds=2.0)
+    except Exception:
+        pass
+    return (f"VOICED QUOTE REEL READY (NOT posted — review first):\n"
+            f"  File: {out}\n  on-screen quote + separate voiceover | {voice}\n"
+            f"  -> To publish: post_existing_reel(\"{out.name}\", page=\"<nick>\")")
 
 
 @mcp.tool()
@@ -591,6 +953,72 @@ def research_read_url(url: str) -> str:
         return research.page_text(url, max_chars=6000)
     except Exception as e:
         return f"Could not fetch {url}: {e}"
+
+
+# ===========================================================================
+# YOUTUBE SHORTS — upload + schedule (same reels, second platform)
+# ===========================================================================
+@mcp.tool()
+def yt_authorize(channel: str = "default") -> str:
+    """
+    One-time YouTube login for ONE channel. Opens a browser — in Google's
+    chooser pick the channel you want, consent, and the token is saved under
+    `channel` (a nickname you choose, e.g. "finance", "stoic"). Repeat with a
+    different `channel` to connect more channels (each gets its own token).
+    Needs yt_client_secret.json in the folder.
+    """
+    try:
+        return yt.authorize(channel)
+    except Exception as e:
+        return f"Authorize failed: {e}"
+
+
+@mcp.tool()
+def yt_channels() -> str:
+    """List YouTube channels you've authorized (nicknames) + their info."""
+    nicks = yt.list_channels()
+    if not nicks:
+        return "No channels authorized yet. Run yt_authorize(channel='name')."
+    out = []
+    for n in nicks:
+        try:
+            c = yt.channel_info(n)
+            out.append(f"  {n}: {c.get('title')} | subs {c.get('subs')} | "
+                       f"videos {c.get('videos')}")
+        except Exception as e:
+            out.append(f"  {n}: (error {e})")
+    return "Authorized channels:\n" + "\n".join(out)
+
+
+@mcp.tool()
+def yt_upload(video_path: str, title: str, description: str = "",
+             tags: list = None, privacy: str = "public",
+             publish_at_unix: int = 0, channel: str = "default") -> str:
+    """
+    Upload a reel to a YouTube channel as a SHORT (publish now OR schedule).
+
+    video_path:       path to the .mp4 (vertical 1080x1920, <60s)
+    title:            video title ('#Shorts' auto-added if missing)
+    description:      description + hashtags
+    tags:             list of tag strings
+    privacy:          public | unlisted | private
+    publish_at_unix:  future UNIX timestamp to SCHEDULE (0 = post now).
+    channel:          which authorized channel nickname to upload to.
+    NOTE: default quota allows ~6 uploads/day per project.
+    """
+    publish_at = ""
+    if publish_at_unix:
+        from datetime import datetime, timezone
+        publish_at = datetime.fromtimestamp(
+            publish_at_unix, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        res = yt.upload_short(video_path, title, description=description,
+                              tags=tags, privacy=privacy, publish_at=publish_at,
+                              channel=channel)
+        when = "scheduled" if res["scheduled"] else "uploaded"
+        return f"OK {when} to YouTube ({channel}): {res['url']}"
+    except Exception as e:
+        return f"Upload failed: {e}"
 
 
 @mcp.tool()

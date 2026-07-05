@@ -4,8 +4,14 @@ Free lead-gen + cold outreach + auto-reply MCP server. Find businesses (USA firs
 then Jamaica / other countries), email them from your Gmail, catch replies, and
 respond to schedule a call. No paid tools.
 
-- **Leads**: Google Places API (free tier)
-- **Email send/read**: your Gmail (SMTP + IMAP via an App Password)
+- **Leads** (4 sources, mix and match):
+  - `osm` - OpenStreetMap, **free, no API key** (default)
+  - `yellowpages` - scrape Yellow Pages, **free, no key**
+  - `google` - Google Places (needs `GOOGLE_PLACES_API_KEY`)
+  - `yelp` - Yelp Fusion (needs free `YELP_API_KEY`)
+  - `all` - pull from every source you have, deduped by name
+- **Email send/read**: any SMTP/IMAP provider (Hostinger custom domain recommended;
+  Gmail/Zoho also work). Custom domain + SPF/DKIM = best inbox delivery.
 - **Copy**: written by Claude through this MCP
 - **Booking**: optional Calendly link (or the reply just asks for a time)
 
@@ -31,11 +37,22 @@ respond to schedule a call. No paid tools.
 4. Register with Claude (same way as reels-factory): add an MCP server that runs
    `python server.py` in this folder (stdio).
 
+## Simplest usage (one command)
+
+After adding this MCP to Claude, just say:
+
+> "Find mobile pet grooming businesses in Tulsa OK and email them an audit."
+
+Claude calls **`run_campaign`**, which does everything in one shot: finds leads,
+gets their emails, audits each website, builds a branded PDF report, and sends
+the personalized outreach with the PDF attached. Emails go out automatically.
+
 ## Daily workflow (talk to Claude)
 
 ```
 check_setup
-find_leads city="Austin TX" category="plumbers" limit=20 only_no_website=true
+find_leads city="Austin TX" category="plumbers" source="osm" only_no_website=true
+# or pull from every source: find_leads city="Austin TX" category="plumbers" source="all"
 enrich_emails limit=20
 preview_outreach <place_id>        # eyeball one
 send_outreach limit=10 dry_run=true   # check, then dry_run=false to send

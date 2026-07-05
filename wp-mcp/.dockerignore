@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+server.log
+ngrok.log
+_test_*.png
+wp-config.local.json
+sftp-config.local.json
+mu-plugin/

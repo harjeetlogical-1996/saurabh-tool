@@ -130,14 +130,19 @@ GEMINI_VOICES = {
 
 
 def _gemini_say(text: str, out_path: Path, voice_name: str,
-                api_key: str, model: str = "gemini-2.5-flash-preview-tts") -> Path:
-    """Generate speech with Gemini TTS (paid, ~$10/1M chars). Real-human quality."""
+                api_key: str, model: str = "gemini-2.5-flash-preview-tts",
+                style: str = "") -> Path:
+    """Generate speech with Gemini TTS (paid, ~$10/1M chars). Real-human quality.
+    `style` prepends a delivery instruction (e.g. 'excited, expressive') so the
+    voice carries emotion instead of sounding flat."""
     from google import genai
     from google.genai import types
     import base64, struct, wave
 
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY missing in .env")
+    if style:
+        text = f"Say this in a {style} tone, with natural emotion and energy: {text}"
     client = genai.Client(api_key=api_key)
     resp = client.models.generate_content(
         model=model,
@@ -164,20 +169,21 @@ def _gemini_say(text: str, out_path: Path, voice_name: str,
 
 
 def make_voice(text: str, out_path: Path, voice: str = "en-US-AriaNeural",
-               gemini_key: str = "") -> Path:
+               gemini_key: str = "", style: str = "") -> Path:
     """
     Generate an English voiceover mp3.
       - "gemini:*" (or a raw Gemini voice like "Kore") -> Gemini TTS
         (paid ~Rs0.71/min, real-human quality, 30 voices)
       - "kokoro:*" / af_/am_/bf_/bm_ -> local Kokoro (free, offline)
       - anything else -> Edge-TTS (fast, online, free)
+    `style` (Gemini only): delivery emotion e.g. "excited and expressive".
     """
     out_path = Path(out_path)
 
     # Gemini path
     if voice.startswith("gemini:") or voice in GEMINI_VOICES.values():
         vname = GEMINI_VOICES.get(voice, voice.replace("gemini:", "") or "Kore")
-        return _gemini_say(text, out_path, vname, gemini_key)
+        return _gemini_say(text, out_path, vname, gemini_key, style=style)
 
     # Kokoro path
     if voice.startswith("kokoro:") or voice[:3] in ("af_", "am_", "bf_", "bm_"):
@@ -207,6 +213,22 @@ def pad_audio_tail(audio_path: Path, seconds: float = 0.8) -> Path:
         str(padded),
     ], check=True, capture_output=True, text=True)
     padded.replace(audio_path)
+    return audio_path
+
+
+def speed_up_audio(audio_path: Path, factor: float = 1.15) -> Path:
+    """
+    Speed up a voice clip WITHOUT changing pitch (atempo). factor 1.15 = 15%
+    faster. Good for making narration punchier. Overwrites in place.
+    """
+    audio_path = Path(audio_path)
+    fast = audio_path.with_name(audio_path.stem + "_fast" + audio_path.suffix)
+    subprocess.run([
+        "ffmpeg", "-y", "-i", str(audio_path),
+        "-af", f"atempo={factor:.3f}",
+        str(fast),
+    ], check=True, capture_output=True, text=True)
+    fast.replace(audio_path)
     return audio_path
 
 
@@ -615,6 +637,136 @@ def build_overlay(duration: float, out_path: Path, hook: str = "",
 # backwards-compatible alias
 def build_hook_overlay(hook: str, duration: float, out_path: Path) -> Path:
     return build_overlay(duration, out_path, hook=hook, outro="")
+
+
+def build_full_quote_ass(quote: str, duration: float, out_path: Path,
+                         author: str = "", brand: str = "",
+                         outro: str = "") -> Path:
+    """
+    Style A: render the WHOLE quote on screen at once (big bold sans-serif,
+    centered, gentle fade-in). For silent 'read-it-yourself' quote reels.
+    """
+    # wrap quote to ~22 chars/line for big centered text
+    words = quote.replace("\n", " ").split()
+    lines, cur = [], ""
+    for w in words:
+        if len(cur) + len(w) + 1 <= 22:
+            cur = (cur + " " + w).strip()
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    # escape each line FIRST, then join with the ASS line-break \N
+    # (escaping the joined string would turn \N into \\N and show a literal '\')
+    body = r"\N".join(_ass_escape(ln) for ln in lines)
+    if author:
+        body += r"\N\N" + _ass_escape(author)
+
+    # Bold sans-serif look. \fad(600,400) fades whole block in/out.
+    style = ("Style: Quote,Arial,82,&H00FFFFFF,&H00000000,&H96000000,"
+             "1,3,2,5,100,100,0,1")
+    brand_style = ("Style: Br,Arial,46,&H00DDDDDD,&H00000000,&H64000000,"
+                   "1,2,1,8,60,60,80,1")
+    outro_style = ("Style: Out,Arial,52,&H00FFFFFF,&H00000000,&H64000000,"
+                   "1,2,1,2,60,60,120,1")
+    header = (
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, "
+        "BackColour, Bold, Outline, Shadow, Alignment, MarginL, MarginR, "
+        "MarginV, Encoding\n"
+        f"{style}\n{brand_style}\n{outro_style}\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, "
+        "MarginV, Effect, Text\n")
+    # body is ALREADY escaped + has \N line breaks; don't escape again
+    ev = [f"Dialogue: 0,{_ts(0)},{_ts(duration)},Quote,,0,0,0,,"
+          f"{{\\fad(600,400)}}{body}"]
+    if brand:
+        ev.append(f"Dialogue: 0,{_ts(0)},{_ts(duration)},Br,,0,0,0,,"
+                  f"{_ass_escape(brand)}")
+    if outro:
+        start = max(0.0, duration - 2.0)
+        ev.append(f"Dialogue: 0,{_ts(start)},{_ts(duration)},Out,,0,0,0,,"
+                  f"{{\\fad(300,0)}}{_ass_escape(outro)}")
+    Path(out_path).write_text(header + "\n".join(ev), encoding="utf-8")
+    return Path(out_path)
+
+
+def build_silent_quote_reel(bg_video: Path, quote: str, out_path: Path,
+                            duration: float = 9.0, music: Path | None = None,
+                            author: str = "", brand: str = "",
+                            outro: str = "", music_volume: float = 1.0) -> Path:
+    """
+    Style A reel: stock bg + WHOLE quote on screen + MUSIC ONLY (no voice).
+    Music plays at FULL volume since there's no voiceover to sit under.
+    User reads at their own pace. `duration` is the full clip length.
+    """
+    ass = Path(out_path).with_suffix(".quote.ass")
+    build_full_quote_ass(quote, duration, ass, author=author, brand=brand,
+                         outro=outro)
+    ass_path = str(ass).replace("\\", "/").replace(":", "\\:")
+    vf = ("scale=1080:1920:force_original_aspect_ratio=increase,"
+          "crop=1080:1920,"
+          # subtle dark gradient for readability
+          "eq=brightness=-0.06:saturation=0.9,"
+          f"subtitles='{ass_path}'")
+    cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(bg_video)]
+    if music and Path(music).exists():
+        cmd += ["-stream_loop", "-1", "-i", str(music),
+                "-t", f"{duration:.2f}", "-vf", vf,
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-af", f"volume={music_volume},afade=t=out:st={duration-1:.2f}:d=1"]
+    else:
+        cmd += ["-t", f"{duration:.2f}", "-vf", vf,
+                "-f", "lavfi", "-i", "anullsrc", "-map", "0:v:0", "-map", "1:a:0",
+                "-shortest"]
+    cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p", "-r", "30",
+            "-t", f"{duration:.2f}", str(out_path)]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return Path(out_path)
+
+
+def build_voiced_quote_reel(bg_video: Path, on_screen_quote: str,
+                            voice_mp3: Path, out_path: Path,
+                            music: Path | None = None, author: str = "",
+                            brand: str = "", outro: str = "",
+                            music_volume: float = 0.30) -> Path:
+    """
+    'Separated' quote reel: the ON-SCREEN text is the short quote, while the
+    VOICEOVER says a DIFFERENT (longer) script. The voice text is NOT shown.
+    Length follows the voiceover + a 1.5s hold.
+    """
+    vdur = get_audio_duration(voice_mp3)
+    duration = vdur + 1.5  # hold last frame
+    ass = Path(out_path).with_suffix(".quote.ass")
+    build_full_quote_ass(on_screen_quote, duration, ass, author=author,
+                         brand=brand, outro=outro)
+    ass_path = str(ass).replace("\\", "/").replace(":", "\\:")
+    vf = ("scale=1080:1920:force_original_aspect_ratio=increase,"
+          "crop=1080:1920,eq=brightness=-0.06:saturation=0.9,"
+          f"subtitles='{ass_path}'")
+
+    cmd = ["ffmpeg", "-y",
+           "-stream_loop", "-1", "-i", str(bg_video),  # 0 video
+           "-i", str(voice_mp3)]                        # 1 voice
+    if music and Path(music).exists():
+        cmd += ["-stream_loop", "-1", "-i", str(music)]  # 2 music
+        fc = (f"[2:a]volume={music_volume}[bg];"
+              f"[1:a]volume=1.6,apad=pad_dur=1.5[vo];"
+              f"[vo][bg]amix=inputs=2:duration=first:dropout_transition=0,"
+              f"afade=t=out:st={duration-1:.2f}:d=1[aout]")
+        cmd += ["-t", f"{duration:.2f}", "-vf", vf,
+                "-filter_complex", fc, "-map", "0:v:0", "-map", "[aout]"]
+    else:
+        cmd += ["-t", f"{duration:.2f}", "-vf", vf,
+                "-af", "apad=pad_dur=1.5", "-map", "0:v:0", "-map", "1:a:0"]
+    cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p", "-r", "30",
+            "-t", f"{duration:.2f}", str(out_path)]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return Path(out_path)
 
 
 def make_endcard(out_path: Path, text: str = "Follow for more!",

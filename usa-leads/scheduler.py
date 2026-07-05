@@ -22,6 +22,7 @@ import store
 import leads as leadlib
 import emailcopy as copylib
 import mailer
+import audit
 
 STATE_FILE = store.DATA / "sched_state.json"
 
@@ -60,14 +61,19 @@ def run_daily_job(env: dict) -> str:
     find_limit = int(env.get("AUTO_FIND_LIMIT", "20") or "20")
     send_limit = int(env.get("AUTO_SEND_LIMIT", "20") or "20")
 
-    # 1. find
-    if city and category and env.get("GOOGLE_PLACES_API_KEY"):
+    # 1. find (uses AUTO_SOURCE, default "osm" which needs no API key)
+    auto_source = env.get("AUTO_SOURCE", "osm").strip() or "osm"
+    if city and category:
         def _find():
-            r = leadlib.find_leads(env, city, category, find_limit, only_no_website=False)
-            return f"added {r['added']} ({r['no_website']} no-site), {r['already_known']} known"
+            r = leadlib.find_leads(env, city, category, find_limit,
+                                   only_no_website=False, source=auto_source)
+            if r.get("error"):
+                return r["error"]
+            note = (" | " + "; ".join(r["errors"])) if r.get("errors") else ""
+            return f"added {r['added']} ({r['no_website']} no-site), {r['already_known']} known{note}"
         step("find_leads", _find)
     else:
-        log.append("find_leads: skipped (set AUTO_CITY, AUTO_CATEGORY, GOOGLE_PLACES_API_KEY)")
+        log.append("find_leads: skipped (set AUTO_CITY and AUTO_CATEGORY)")
 
     # 2. enrich
     def _enrich():
@@ -82,14 +88,18 @@ def run_daily_job(env: dict) -> str:
         if quota <= 0:
             return "daily cap reached, nothing sent"
         sender = env.get("SENDER_NAME", "")
-        scity = env.get("SENDER_CITY", "")
+        company = env.get("COMPANY_NAME", "digitograffi")
+        years = env.get("EXPERIENCE_YEARS", "15+")
+        ps_key = env.get("PAGESPEED_API_KEY", "")
         sent = 0
         for lead in leads.values():
             if sent >= quota:
                 break
             if lead.get("status") != "new" or not lead.get("email"):
                 continue
-            mail = copylib.build_outreach(lead, sender, scity)
+            a = lead.get("audit") or audit.audit_site(lead.get("website", ""), ps_key)
+            lead["audit"] = a
+            mail = copylib.build_audit_outreach(lead, a, sender, company, years)
             mid = mailer.send_mail(env, lead["email"], mail["subject"], mail["body"])
             lead["status"] = "emailed"
             lead["message_id"] = mid
@@ -136,11 +146,11 @@ def run_daily_job(env: dict) -> str:
     summary = "usa-leads daily run " + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") \
               + "\n\n" + "\n".join(log)
 
-    # 5. email yourself the summary
+    # 5. email yourself the summary (to SUMMARY_EMAIL, else the sending account)
     try:
-        if env.get("GMAIL_ADDRESS") and env.get("GMAIL_APP_PASSWORD"):
-            mailer.send_mail(env, env["GMAIL_ADDRESS"],
-                             "usa-leads daily summary", summary)
+        if store.mail_address(env):
+            to = env.get("SUMMARY_EMAIL", "").strip() or store.mail_address(env)
+            mailer.send_mail(env, to, "usa-leads daily summary", summary)
     except Exception as e:
         summary += f"\n\n(could not email summary: {e})"
     return summary

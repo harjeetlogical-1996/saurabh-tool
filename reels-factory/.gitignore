@@ -7,3 +7,7 @@ __pycache__/
 *.pyc
 CLAUDE_AI_CONNECT.txt
 voice_samples/
+yt_token.json
+yt_tokens/
+yt_client_secret.json
+RENDER_ENV_VARS.txt

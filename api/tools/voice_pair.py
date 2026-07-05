@@ -43,10 +43,9 @@ def _ffmpeg() -> str:
     candidates = [
         os.environ.get("FFMPEG_BIN"),
         shutil.which("ffmpeg"),
-        r"C:\Users\Admin\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin\ffmpeg.exe",
     ]
     for c in candidates:
-        if c and Path(c).exists():
+        if c and (Path(c).exists() or shutil.which(c)):
             return c
     return "ffmpeg"
 

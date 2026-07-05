@@ -513,6 +513,223 @@ def highlight_number(big: str, sub: str, out_path: Path, duration: float = 3.5,
     return _frames_to_video(fdir, out_path)
 
 
+def indices_board(items: list, out_path: Path, duration: float = 6.0,
+                  heading: str = "MARKET INDICES", market: str = "INDIA",
+                  date_str: str = "") -> Path:
+    """
+    Full-screen index board: name + level + day change (green/red).
+    For the long-form market wrap intro. 1080x1920.
+    """
+    frames = int(duration * FPS)
+    fdir = _clean_dir("idx")
+    n = len(items)
+    cur_sym = "₹" if (items and items[0].get("inr")) else ""
+    for i in range(frames):
+        prog = i / max(1, frames - 1)
+        fig = _fig()
+        fig.text(0.5, 0.86, market, color=GOLD, fontsize=34, ha="center",
+                 weight="bold")
+        if date_str:
+            fig.text(0.5, 0.825, date_str, color=GREY, fontsize=26, ha="center")
+        fig.text(0.5, 0.75, heading, color=WHITE, fontsize=54, ha="center",
+                 weight="bold")
+        top = 0.62
+        gap = 0.14
+        for k, it in enumerate(items):
+            appear = _ease(max(0, min(1, prog * n - k)))
+            if appear <= 0:
+                continue
+            y = top - k * gap
+            up = it["change"] >= 0
+            accent = GREEN if up else RED
+            fig.text(0.10, y, it["name"], color=WHITE, fontsize=42,
+                     ha="left", weight="bold", alpha=appear)
+            fig.text(0.10, y - 0.05, f"{cur_sym}{it['price']:,.0f}", color=GREY,
+                     fontsize=30, ha="left", alpha=appear)
+            sign = "+" if up else ""
+            fig.text(0.92, y, f"{sign}{it['change']:.2f}%", color=accent,
+                     fontsize=48, ha="right", weight="bold", alpha=appear)
+        fig.savefig(fdir / f"f{i:04d}.png", facecolor=BG)
+        plt.close(fig)
+    return _frames_to_video(fdir, out_path)
+
+
+def news_board(headlines: list, out_path: Path, duration: float = 8.0,
+               heading: str = "TOP MARKET NEWS", market: str = "INDIA",
+               date_str: str = "") -> Path:
+    """
+    News headlines board — each headline wraps to 2 lines, reveals in turn.
+    For the market-wrap news section. 1080x1920.
+    """
+    import textwrap
+    frames = int(duration * FPS)
+    fdir = _clean_dir("news")
+    n = len(headlines)
+    wrapped = [textwrap.fill(h, width=32) for h in headlines]
+    for i in range(frames):
+        prog = i / max(1, frames - 1)
+        fig = _fig()
+        fig.text(0.5, 0.86, market, color=GOLD, fontsize=32, ha="center",
+                 weight="bold")
+        if date_str:
+            fig.text(0.5, 0.825, date_str, color=GREY, fontsize=25, ha="center")
+        fig.text(0.5, 0.75, heading, color=WHITE, fontsize=48, ha="center",
+                 weight="bold")
+        top = 0.65
+        gap = 0.13
+        for k, h in enumerate(wrapped):
+            appear = _ease(max(0, min(1, prog * n - k)))
+            if appear <= 0:
+                continue
+            y = top - k * gap
+            fig.text(0.08, y, "▸", color=GOLD, fontsize=30, ha="left",
+                     va="top", alpha=appear)
+            fig.text(0.14, y, h, color="#E8E8E8", fontsize=30, ha="left",
+                     va="top", alpha=appear, linespacing=1.2)
+        fig.savefig(fdir / f"f{i:04d}.png", facecolor=BG)
+        plt.close(fig)
+    return _frames_to_video(fdir, out_path)
+
+
+def title_card(main: str, sub: str, out_path: Path, duration: float = 3.0,
+               date_str: str = "") -> Path:
+    """Simple intro/outro card — big centered title + subtitle. 1080x1920."""
+    frames = int(duration * FPS)
+    fdir = _clean_dir("ttl")
+    for i in range(frames):
+        prog = i / max(1, frames - 1)
+        a = _ease(min(1, prog * 2))
+        fig = _fig()
+        fig.text(0.5, 0.56, main, color=WHITE, fontsize=72, ha="center",
+                 va="center", weight="bold", alpha=a)
+        if sub:
+            fig.text(0.5, 0.46, sub, color=GOLD, fontsize=38, ha="center",
+                     va="center", alpha=a)
+        if date_str:
+            fig.text(0.5, 0.40, date_str, color=GREY, fontsize=30, ha="center",
+                     va="center", alpha=a)
+        fig.savefig(fdir / f"f{i:04d}.png", facecolor=BG)
+        plt.close(fig)
+    return _frames_to_video(fdir, out_path)
+
+
+def stock_section(items: list, out_path: Path, duration: float = 5.0,
+                  heading: str = "TOP GAINERS", market: str = "US STOCKS",
+                  date_str: str = "", positive: bool = True) -> Path:
+    """
+    ONE full-screen section (just gainers OR just losers). Big rows, plenty of
+    room, safe top/bottom margins. Rows reveal one by one. 1080x1920.
+    """
+    frames = int(duration * FPS)
+    fdir = _clean_dir("sec")
+    accent = GREEN if positive else RED
+    n = len(items)
+    cur_sym = "₹" if (items and items[0].get("inr")) else "$"
+    for i in range(frames):
+        prog = i / max(1, frames - 1)
+        fig = _fig()
+        # header block (safe zone, lowered from top edge)
+        fig.text(0.5, 0.86, market, color=GOLD, fontsize=34, ha="center",
+                 weight="bold")
+        if date_str:
+            fig.text(0.5, 0.825, date_str, color=GREY, fontsize=26, ha="center")
+        fig.text(0.5, 0.76, heading, color=accent, fontsize=58, ha="center",
+                 weight="bold")
+        # rows — big, spaced, reveal in sequence
+        top = 0.66
+        gap = 0.115
+        for k, it in enumerate(items):
+            appear = _ease(max(0, min(1, prog * n - k)))
+            if appear <= 0:
+                continue
+            y = top - k * gap
+            chg = it["change"] * appear
+            fig.text(0.10, y, it["symbol"][:14], color=WHITE, fontsize=46,
+                     ha="left", weight="bold", alpha=appear)
+            if it.get("prev") and it.get("price"):
+                ptxt = f"{cur_sym}{it['prev']:,.0f} > {cur_sym}{it['price']:,.0f}"
+                fig.text(0.10, y - 0.045, ptxt, color=GREY, fontsize=28,
+                         ha="left", alpha=appear)
+            sign = "+" if positive else ""
+            fig.text(0.92, y, f"{sign}{chg:.1f}%", color=accent, fontsize=52,
+                     ha="right", weight="bold", alpha=appear)
+        fig.savefig(fdir / f"f{i:04d}.png", facecolor=BG)
+        plt.close(fig)
+    return _frames_to_video(fdir, out_path)
+
+
+def stock_movers(gainers: list, losers: list, out_path: Path,
+                 duration: float = 8.0, title: str = "TOP MOVERS TODAY",
+                 market: str = "US", date_str: str = "") -> Path:
+    """
+    Animated top gainers (green) + losers (red) board for stock reels.
+    gainers/losers: list of dicts {symbol, change, price, prev}.
+    Shows date + 'prev -> current' price. Rows slide/count in. 1080x1920.
+    """
+    frames = int(duration * FPS)
+    fdir = _clean_dir("stk")
+    n_g, n_l = len(gainers), len(losers)
+    total_rows = n_g + n_l
+
+    # SAFE ZONE: keep content between ~0.86 (below top UI) and ~0.10 (above
+    # bottom UI). Title pushed down from the very top edge.
+    for i in range(frames):
+        prog = i / max(1, frames - 1)
+        fig = _fig()
+        # title + market + DATE (lowered into the safe zone)
+        fig.text(0.5, 0.865, title, color=WHITE, fontsize=46, ha="center",
+                 weight="bold")
+        fig.text(0.30, 0.825, market, color=GOLD, fontsize=27, ha="center")
+        if date_str:
+            fig.text(0.70, 0.825, date_str, color=GREY, fontsize=25, ha="center")
+
+        # GAINERS section
+        fig.text(0.12, 0.77, "TOP GAINERS", color=GREEN, fontsize=32,
+                 ha="left", weight="bold")
+        cur_sym = "₹" if (gainers and gainers[0].get("inr")) else "$"
+        for k, g in enumerate(gainers):
+            appear = _ease(max(0, min(1, prog * total_rows - k)))
+            if appear <= 0:
+                continue
+            y = 0.72 - k * 0.065
+            cur = g["change"] * appear
+            fig.text(0.08, y, g["symbol"][:13], color=WHITE, fontsize=29,
+                     ha="left", weight="bold", alpha=appear)
+            # prev -> current price
+            if g.get("prev") and g.get("price"):
+                ptxt = f"{cur_sym}{g['prev']:,.0f}>{cur_sym}{g['price']:,.0f}"
+            else:
+                ptxt = f"{cur_sym}{g.get('price',0):,.0f}"
+            fig.text(0.50, y, ptxt, color=GREY, fontsize=22, ha="left", alpha=appear)
+            fig.text(0.95, y, f"+{cur:.1f}%", color=GREEN, fontsize=32,
+                     ha="right", weight="bold", alpha=appear)
+
+        # LOSERS section
+        ly = 0.72 - n_g * 0.065 - 0.035
+        fig.text(0.12, ly, "TOP LOSERS", color=RED, fontsize=32,
+                 ha="left", weight="bold")
+        lcur_sym = "₹" if (losers and losers[0].get("inr")) else "$"
+        for k, l in enumerate(losers):
+            appear = _ease(max(0, min(1, prog * total_rows - (n_g + k))))
+            if appear <= 0:
+                continue
+            y = ly - 0.05 - k * 0.065
+            cur = l["change"] * appear
+            fig.text(0.08, y, l["symbol"][:13], color=WHITE, fontsize=29,
+                     ha="left", weight="bold", alpha=appear)
+            if l.get("prev") and l.get("price"):
+                ptxt = f"{lcur_sym}{l['prev']:,.0f}>{lcur_sym}{l['price']:,.0f}"
+            else:
+                ptxt = f"{lcur_sym}{l.get('price',0):,.0f}"
+            fig.text(0.50, y, ptxt, color=GREY, fontsize=22, ha="left", alpha=appear)
+            fig.text(0.95, y, f"{cur:.1f}%", color=RED, fontsize=32,
+                     ha="right", weight="bold", alpha=appear)
+
+        fig.savefig(fdir / f"f{i:04d}.png", facecolor=BG)
+        plt.close(fig)
+    return _frames_to_video(fdir, out_path)
+
+
 def text_card(text: str, out_path: Path, duration: float = 3.0,
               color: str = WHITE) -> Path:
     """A simple centered text scene on the finance background (intro/hook)."""
