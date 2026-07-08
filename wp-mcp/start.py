@@ -653,10 +653,78 @@ def _handle_stripe_event(event):
             db.set_plan(uid, "free")  # downgrade when subscription ends
 
 
+def _handle_razorpay_subscription(event, etype):
+    """Handle Razorpay Subscription lifecycle events (auto-renewal).
+      - subscription.charged  -> a monthly cycle was billed successfully: renew the plan
+        for another ~31 days (this is what makes auto-renewal work).
+      - subscription.cancelled / .completed / .halted / .expired -> stop renewing: the
+        daily downgrade job drops them to free at period end (or we mark it now).
+    Attribution (user_id, item) travels in the subscription's `notes`."""
+    sub_id, notes = rzp_mod.extract_subscription(event)
+    uid = notes.get("user_id")
+    item = notes.get("item", "")
+    currency = notes.get("currency", "INR")
+    if not uid:
+        print(f"[webhook] subscription event {etype} without user_id, skipping")
+        return
+
+    if etype == "subscription.charged":
+        # Idempotency: each charge has a unique payment id; act once per charge.
+        pay_id = rzp_mod.extract_payment_id(event)
+        dedup = f"rzpsub:{sub_id}:{pay_id or ''}"
+        try:
+            if not db.mark_event_processed(dedup):
+                print(f"[webhook] duplicate subscription.charged ignored ({dedup})")
+                return
+        except Exception as e:  # noqa: BLE001
+            print(f"[webhook] sub idempotency check failed, skipping: {e}")
+            return
+        if not item:
+            print(f"[webhook] subscription.charged missing item for uid={uid}")
+            return
+        # Renew: grant the plan's allowances again + push the expiry another ~31 days.
+        db.set_plan(uid, item, valid_days=33)   # +2d grace over the 31d billing cycle
+        db.set_subscription(uid, "razorpay", sub_id, "active")
+        # Record the renewal payment + invoice (GST for INR).
+        paid_amt, _cur = rzp_mod.extract_amount(event)
+        table = rzp_mod.PLAN_PRICES_INR if currency == "INR" else rzp_mod.PLAN_PRICES_USD
+        label, list_amt = table.get(item, (item, 0))
+        total = paid_amt if paid_amt is not None else list_amt
+        try:
+            inv_no = db.next_invoice_no()
+        except Exception:
+            inv_no = ""
+        try:
+            db.record_transaction(uid, "razorpay", "plan", item, total,
+                                  rzp_mod.extract_payment_id(event), currency=currency,
+                                  base_amount=total, invoice_no=inv_no)
+        except Exception:
+            pass
+        # Affiliate commission is credited only on the FIRST payment (convert_referral is
+        # idempotent), so renewals correctly don't re-pay the referrer.
+        print(f"[webhook] subscription renewed uid={uid} item={item} sub={sub_id}")
+        return
+
+    if etype in ("subscription.cancelled", "subscription.completed",
+                 "subscription.expired", "subscription.halted"):
+        # Stop auto-renew. Keep the plan until its current expiry (they paid for it); the
+        # daily downgrade job drops them to free once sub_renews_at passes.
+        try:
+            db.set_subscription_status(uid, "canceled")
+        except Exception as e:  # noqa: BLE001
+            print(f"[webhook] mark sub canceled failed uid={uid}: {e}")
+        print(f"[webhook] subscription {etype} uid={uid} sub={sub_id}")
+        return
+
+
 def _handle_razorpay_event(event):
     """Apply a verified Razorpay webhook: grant plan / credits on paid payment.
     We act on payment_link.paid (hosted link) and payment.captured (fallback)."""
     etype = event.get("event", "") if isinstance(event, dict) else ""
+    # Recurring subscription lifecycle (auto-renewal) is handled separately.
+    if etype.startswith("subscription."):
+        _handle_razorpay_subscription(event, etype)
+        return
     if etype not in ("payment_link.paid", "payment.captured", "order.paid"):
         return
     notes = rzp_mod.extract_notes(event)
@@ -2491,10 +2559,28 @@ async def asgi_app(scope, receive, send):
                     await _send_html(send, 302, "", [(b"location",
                         b"/dashboard?ok=Plan+activated+with+your+coupon#plan")])
                     return
-                url = rzp_mod.create_plan_link(uid, email_addr, plan, PUBLIC_URL, currency,
-                                               amount=total, coupon=applied,
-                                               base=base_amt, tax=tax_amt,
-                                               gstin=db.get_gstin(uid))
+                # AUTO-RENEWAL: if no first-month discount/coupon is applied AND a Razorpay
+                # subscription plan is configured for this (plan,currency), sell it as a
+                # recurring subscription so it renews automatically each month. A discounted
+                # first month uses the one-time link (Razorpay subscriptions bill the full
+                # plan amount every cycle, so we can't put a one-off discount inside one).
+                use_sub = (not applied) and rzp_mod.subscriptions_available(plan, currency)
+                if use_sub:
+                    url, sub_id = rzp_mod.create_subscription(
+                        uid, email_addr, plan, PUBLIC_URL, currency,
+                        notes_extra={"base": base_amt, "tax": tax_amt,
+                                     "gstin": db.get_gstin(uid)})
+                    # Remember the pending subscription id; the plan is granted when the
+                    # first subscription.charged webhook arrives.
+                    try:
+                        db.set_subscription(uid, "razorpay", sub_id, "pending")
+                    except Exception:
+                        pass
+                else:
+                    url = rzp_mod.create_plan_link(uid, email_addr, plan, PUBLIC_URL, currency,
+                                                   amount=total, coupon=applied,
+                                                   base=base_amt, tax=tax_amt,
+                                                   gstin=db.get_gstin(uid))
                 # Record the welcome claim now (at link creation) so the same user / device /
                 # IP can't grab the intro price again even if they abandon this payment and
                 # retry with a fresh email. One intro discount per device, period.
@@ -2548,9 +2634,15 @@ async def asgi_app(scope, receive, send):
                     b"/dashboard?err=Session+expired,+please+try+again#plan")])
                 return
             try:
+                # First stop Razorpay from auto-charging again (if it's a subscription).
+                # cancel_at_cycle_end -> they keep the plan for the period they already paid.
+                sub_id = db.get_subscription_id(uid)
+                prov = (db.get_billing_summary(uid) or {}).get("sub_provider", "")
+                if sub_id and prov == "razorpay":
+                    rzp_mod.cancel_subscription_remote(sub_id, at_cycle_end=True)
                 end = db.cancel_subscription(uid)
                 if end:
-                    msg = f"Plan canceled. You keep your plan until {end}, then move to Free."
+                    msg = f"Plan canceled. You keep your plan until {end}, then move to Free. No further charges."
                 else:
                     msg = "Plan canceled. You are now on the Free plan."
             except Exception as e:  # noqa: BLE001

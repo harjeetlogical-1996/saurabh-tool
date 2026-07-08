@@ -1464,6 +1464,20 @@ def set_subscription(user_id: str, provider: str, sub_id: str, status: str, rene
         )
 
 
+def set_subscription_status(user_id: str, status: str):
+    """Update only sub_status (e.g. 'canceled' when a Razorpay subscription is cancelled),
+    leaving sub_id / renews_at intact so the plan runs out its paid period."""
+    with _pool.connection() as conn:
+        conn.execute("UPDATE users SET sub_status=%s WHERE id=%s", (status, user_id))
+
+
+def get_subscription_id(user_id: str):
+    """The provider subscription id (Razorpay sub_xxx / Stripe sub_xxx), or ''."""
+    with _pool.connection() as conn:
+        r = conn.execute("SELECT sub_id FROM users WHERE id=%s", (user_id,)).fetchone()
+    return (r[0] if r and r[0] else "") or ""
+
+
 def find_user_by_stripe_customer(customer_id: str):
     with _pool.connection() as conn:
         r = conn.execute("SELECT id FROM users WHERE stripe_customer_id=%s", (customer_id,)).fetchone()

@@ -123,6 +123,86 @@ def create_plan_link(user_id, email, plan_key, base_url, currency="INR",
     return res.get("short_url")
 
 
+# ---------------------------------------------------------------------------
+# Recurring subscriptions (Razorpay Subscriptions API)
+# ---------------------------------------------------------------------------
+# For TRUE auto-renewal we use Razorpay Subscriptions: the user authorises once and
+# Razorpay charges them every month automatically, firing `subscription.charged` each
+# time. This needs a Razorpay "Plan" object per (plan, currency, billing-period) - create
+# those in the Razorpay dashboard (or API) and put their plan_ids in env as JSON:
+#
+#   RAZORPAY_PLAN_IDS = {"owai_starter": {"INR": "plan_xxx", "USD": "plan_yyy"}, ...}
+#
+# If a plan_id isn't configured for a (plan,currency), we FALL BACK to the one-time
+# Payment Link (create_plan_link) so nothing breaks - just no auto-renew for that one.
+_PLAN_IDS = {}
+try:
+    _PLAN_IDS = json.loads(os.environ.get("RAZORPAY_PLAN_IDS", "") or "{}")
+except Exception:
+    _PLAN_IDS = {}
+
+
+def subscription_plan_id(plan_key, currency="INR"):
+    """Return the Razorpay plan_id for this (plan, currency), or '' if not configured."""
+    currency = "USD" if currency == "USD" else "INR"
+    entry = _PLAN_IDS.get(plan_key) or {}
+    if isinstance(entry, str):          # allow a flat "plan_xxx" (INR-only) too
+        return entry if currency == "INR" else ""
+    return (entry.get(currency) or "").strip()
+
+
+def subscriptions_available(plan_key, currency="INR"):
+    """True if we can sell this plan as an auto-renewing subscription."""
+    return bool(subscription_plan_id(plan_key, currency))
+
+
+def create_subscription(user_id, email, plan_key, base_url, currency="INR",
+                        notes_extra=None):
+    """Create a Razorpay Subscription (auto-renewing) and return its short_url.
+    The user authorises once; Razorpay then charges monthly and fires
+    `subscription.charged` each cycle. total_count is large so it effectively
+    renews until cancelled. Notes carry our attribution for the webhook."""
+    currency = "USD" if currency == "USD" else "INR"
+    plan_id = subscription_plan_id(plan_key, currency)
+    if not plan_id:
+        raise ValueError(f"no subscription plan_id for {plan_key}/{currency}")
+    notes = {"user_id": user_id, "kind": "plan", "item": plan_key, "currency": currency}
+    if notes_extra:
+        notes.update({k: str(v) for k, v in notes_extra.items()})
+    payload = {
+        "plan_id": plan_id,
+        "total_count": 120,             # up to 120 monthly cycles (~10 yrs); cancel ends it
+        "quantity": 1,
+        "customer_notify": 1,
+        "notes": notes,
+        "notify_info": {"notify_email": email or ""},
+        # Razorpay redirects here after the mandate is authorised.
+        "callback_url": f"{base_url}/billing?success=1",
+    }
+    res = _post("/subscriptions", payload)
+    return res.get("short_url"), res.get("id", "")
+
+
+def cancel_subscription_remote(sub_id, at_cycle_end=True):
+    """Cancel a Razorpay subscription so it stops auto-charging. at_cycle_end=True lets
+    the user keep the plan until the paid period ends. Returns True on success."""
+    if not sub_id:
+        return False
+    try:
+        _post(f"/subscriptions/{sub_id}/cancel",
+              {"cancel_at_cycle_end": 1 if at_cycle_end else 0})
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[razorpay] cancel subscription {sub_id} failed: {e}")
+        return False
+
+
+def extract_subscription(event):
+    """Pull (subscription_id, notes) from a subscription.* webhook event."""
+    ent = (event.get("payload", {}) or {}).get("subscription", {}).get("entity", {})
+    return ent.get("id", ""), (ent.get("notes") or {})
+
+
 def pack_supported(pack_id, currency="INR"):
     table = CREDIT_PACKS_INR if currency == "INR" else CREDIT_PACKS_USD
     return pack_id in table

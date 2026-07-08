@@ -130,6 +130,39 @@ for p in / /pricing /login /services /contact /faq /about; do
 
 ---
 
+## 💳 Auto-renewal (Razorpay Subscriptions) — SETUP zaroori
+
+Code recurring subscriptions support karta hai (auto har-mahine charge), PAR wo tabhi chalega jab
+Razorpay pe **Plan objects** bana ke unke IDs env me daale jaayein. Jab tak ye nahi hota, plans
+**one-time** rehte hain (31-din, phir free — auto-renew nahi).
+
+### Enable karne ke steps:
+1. **Razorpay Dashboard** → Subscriptions → **Plans** → har plan+currency ke liye ek monthly Plan banao:
+   - Starter INR (₹1,699/month), Starter USD ($20/month)
+   - Pro INR (₹8,299/month), Pro USD ($99/month)
+   - (Mini optional, India-only)
+   - Har ek ka `plan_id` copy karo (jaise `plan_QxAbc123`)
+2. **Razorpay account pe "Subscriptions" / international recurring enable** hona chahiye (USD ke liye
+   International + recurring dono on).
+3. Railway pe env var set karo (JSON):
+   ```bash
+   railway variables --service wp-mcp --set 'RAZORPAY_PLAN_IDS={"owai_starter":{"INR":"plan_xxx","USD":"plan_yyy"},"owai_pro":{"INR":"plan_aaa","USD":"plan_bbb"}}'
+   ```
+4. **Razorpay Webhook** me ye events bhi ON karo (existing payment events ke saath):
+   `subscription.charged`, `subscription.cancelled`, `subscription.completed`,
+   `subscription.halted`, `subscription.expired`
+5. Redeploy: `railway up --service wp-mcp --ci`
+
+### Kaise kaam karega (enable hone ke baad):
+- Naya paid user (bina discount) → subscription banega → user ek baar authorize (autopay mandate)
+  → Razorpay **har mahine apne aap charge** karega → `subscription.charged` webhook → plan renew.
+- First-month **discount/coupon** wale → us pehle mahine one-time link (discount subscription me
+  nahi ghusta). Baad me full-price subscription le sakte hain.
+- **Cancel** → Razorpay pe bhi cancel (cycle-end) + local sub_status=canceled → period-end pe free.
+- Fallback: kisi plan ka plan_id nahi mila to wo one-time link se bikega (safe).
+
+---
+
 ## 🔭 Known / watch-list (launch-blocker nahi, baad me)
 
 - **`/pricing` kabhi slow** (2–5s, kabhi timeout). Single-threaded ASGI; koi query optimize karni ho sakti hai.
