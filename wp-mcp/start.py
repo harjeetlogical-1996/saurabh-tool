@@ -2117,9 +2117,19 @@ async def asgi_app(scope, receive, send):
                 return
             label, amt = rzp_mod.plan_price(plan, currency)
             sym = "₹" if currency == "INR" else "$"
-            tax_amt, total, rate = db.gst_on(amt, currency)
+            # First-month welcome discount: auto-applied for eligible first-time buyers.
+            # We check by user + IP here; the device fingerprint is added at POST time
+            # (JS supplies it) and re-checked, so the real gate is on /checkout.
+            wpct = db.welcome_discount_percent(plan)
+            welcome = 0
+            base_amt = amt
+            if wpct and db.welcome_eligible(uid, ip=_client_ip(headers)):
+                welcome = wpct
+                base_amt = round(amt * (100 - wpct) / 100.0, 2)
+            tax_amt, total, rate = db.gst_on(base_amt, currency)
             await _send_html(send, 200, pages.checkout_confirm_page(
-                plan, label, sym, amt, tax=tax_amt, total=total, rate=rate))
+                plan, label, sym, amt, tax=tax_amt, total=total, rate=rate,
+                welcome_pct=welcome, discounted=base_amt))
             return
 
         # ----- Password reset -----
@@ -2421,6 +2431,7 @@ async def asgi_app(scope, receive, send):
                 # Base price (list), minus optional coupon.
                 _label, base_amt = rzp_mod.plan_price(plan, currency)
                 applied = ""
+                welcome_claim = None  # (plan, pct) to record after we build the link
                 if coupon_code:
                     coup, cerr = db.validate_coupon(coupon_code, currency)
                     if not coup:
@@ -2429,6 +2440,19 @@ async def asgi_app(scope, receive, send):
                         return
                     base_amt = db.apply_coupon_amount(coup, base_amt, currency)
                     applied = coupon_code
+                else:
+                    # No manual coupon -> auto first-month welcome discount for eligible
+                    # first-time buyers. Re-checked SERVER-SIDE with device fingerprint + IP
+                    # (the /checkout-after page only checked user+IP), so a new email on the
+                    # same device/IP is caught here.
+                    wpct = db.welcome_discount_percent(plan)
+                    if wpct:
+                        fp = (f.get("fp", "") or "").strip()[:128]
+                        cip = _client_ip(headers)
+                        if db.welcome_eligible(uid, fingerprint=fp, ip=cip):
+                            base_amt = round(base_amt * (100 - wpct) / 100.0, 2)
+                            applied = f"WELCOME{wpct}"   # shows on invoice/notes
+                            welcome_claim = (plan, wpct, fp, cip)
                 # GST: 18% on INR only (international USD = no tax).
                 tax_amt, total, rate = db.gst_on(base_amt, currency)
                 # 100%-off coupon (total is 0): grant the plan directly instead of sending
@@ -2466,6 +2490,15 @@ async def asgi_app(scope, receive, send):
                                                amount=total, coupon=applied,
                                                base=base_amt, tax=tax_amt,
                                                gstin=db.get_gstin(uid))
+                # Record the welcome claim now (at link creation) so the same user / device /
+                # IP can't grab the intro price again even if they abandon this payment and
+                # retry with a fresh email. One intro discount per device, period.
+                if welcome_claim:
+                    try:
+                        _wp, _wpct, _wfp, _wip = welcome_claim
+                        db.record_welcome_claim(uid, _wp, _wpct, fingerprint=_wfp, ip=_wip)
+                    except Exception as _we:  # noqa: BLE001
+                        print(f"[welcome] record claim failed uid={uid}: {_we}")
             except Exception as e:  # noqa: BLE001
                 await _send_json(send, 400, {"error": str(e)[:150]})
                 return

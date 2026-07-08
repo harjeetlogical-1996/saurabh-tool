@@ -419,6 +419,25 @@ def _create_schema():
         # duplicate check in request_payout race-safe: a concurrent second insert fails.
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_payout_open "
                      "ON payout_requests(user_id, currency) WHERE status='requested'")
+        # ----- First-month welcome discount claims (abuse tracking) -----
+        # One record per successful welcome-discount purchase. We block a second claim from
+        # the SAME user, SAME device fingerprint, or SAME IP - so a person can't just make a
+        # new email and grab the intro price again. (None of these is bullet-proof alone;
+        # together they raise the bar without adding OTP/login friction.)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS welcome_claims (
+                id           bigserial PRIMARY KEY,
+                user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                fingerprint  text NOT NULL DEFAULT '',
+                ip           text NOT NULL DEFAULT '',
+                plan         text NOT NULL DEFAULT '',
+                percent      int  NOT NULL DEFAULT 0,
+                created_at   timestamptz NOT NULL DEFAULT now()
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_welcome_uid ON welcome_claims(user_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_welcome_fp ON welcome_claims(fingerprint);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_welcome_ip ON welcome_claims(ip);")
         # ----- Admin-managed blog posts (stored in DB, alongside the built-in ones) -----
         conn.execute("""
             CREATE TABLE IF NOT EXISTS blog_posts_db (
@@ -2741,6 +2760,58 @@ def convert_referral(referred_id, sale_amount, currency="INR", ext_id=""):
             "WHERE referred_id=%s AND status='pending' RETURNING referrer_id",
             (sale_amount, commission, rate, currency, ext_id or "", referred_id)).fetchone()
     return commission if row else None
+
+
+# ---------------------------------------------------------------------------
+# First-month welcome discount (auto, first-time buyers only, abuse-tracked)
+# ---------------------------------------------------------------------------
+# Percent off the FIRST month, by plan. One-time: the plan renews at full price
+# next month (plans already expire in ~31 days, see set_plan valid_days).
+WELCOME_DISCOUNT = {
+    "owai_starter": 30,
+    "owai_pro": 40,
+}
+
+
+def welcome_discount_percent(plan: str) -> int:
+    """Return the intro discount % for a plan (0 if that plan has none)."""
+    return int(WELCOME_DISCOUNT.get(plan, 0))
+
+
+def welcome_eligible(user_id: str, fingerprint: str = "", ip: str = "") -> bool:
+    """True only if this is a genuine first-time buyer who hasn't used the welcome
+    discount before - checked three ways so a new email alone can't re-claim it:
+      1. the user has NO prior completed paid plan transaction, AND
+      2. no welcome claim exists for this user / this device fingerprint / this IP.
+    Any match -> not eligible."""
+    fingerprint = (fingerprint or "").strip()[:128]
+    ip = (ip or "").strip()[:64]
+    with _pool.connection() as conn:
+        # 1) already bought a plan before? then not a first-time buyer.
+        paid = conn.execute(
+            "SELECT 1 FROM transactions WHERE user_id=%s AND kind='plan' "
+            "AND status='completed' LIMIT 1", (user_id,)).fetchone()
+        if paid:
+            return False
+        # 2) has THIS user, or this device, or this IP already claimed a welcome discount?
+        row = conn.execute(
+            "SELECT 1 FROM welcome_claims WHERE user_id=%s "
+            "   OR (fingerprint <> '' AND fingerprint=%s) "
+            "   OR (ip <> '' AND ip=%s) LIMIT 1",
+            (user_id, fingerprint, ip)).fetchone()
+    return row is None
+
+
+def record_welcome_claim(user_id: str, plan: str, percent: int,
+                         fingerprint: str = "", ip: str = ""):
+    """Record that a welcome discount was granted, so the same user / device / IP can't
+    claim it again. Called only after a real (discounted) checkout is initiated."""
+    with _pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO welcome_claims (user_id, fingerprint, ip, plan, percent) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (user_id, (fingerprint or "").strip()[:128], (ip or "").strip()[:64],
+             plan, int(percent)))
 
 
 def affiliate_summary(user_id):

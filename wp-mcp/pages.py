@@ -3933,30 +3933,45 @@ def verify_sent_page(email="", resent=False, toofast=False):
 </div></div></body></html>"""
 
 
-def checkout_confirm_page(plan_key, label, sym, amount, tax=0, total=None, rate=0):
+def checkout_confirm_page(plan_key, label, sym, amount, tax=0, total=None, rate=0,
+                          welcome_pct=0, discounted=None):
     """Review-and-pay page: shown after signup+verify OR when a logged-in user picks a
     paid plan. Shows the GST breakdown and a coupon box that live-recalculates the total
-    before the user is sent to Razorpay. `amount` = base (pre-coupon) list price."""
+    before the user is sent to Razorpay. `amount` = base (pre-coupon) list price.
+    welcome_pct>0 = an auto first-month discount is pre-applied (discounted = the price
+    after that % off, before GST)."""
     total = amount if total is None else total
     rate_disp = rate if rate else 0
+    has_welcome = welcome_pct and discounted is not None and discounted < amount
+    welcome_off = (amount - discounted) if has_welcome else 0
+    # Welcome banner + pre-shown discount row.
+    welcome_banner = (
+        f'<div class=co-welcome>🎉 <strong>First-month offer:</strong> '
+        f'{welcome_pct:.0f}% off your first month applied automatically.</div>'
+        if has_welcome else '')
+    disc_style = ("display:flex;color:var(--accent-hi)" if has_welcome
+                  else "display:none;color:var(--accent-hi)")
+    disc_label = (f"First month {welcome_pct:.0f}% off" if has_welcome else "Discount")
     return _head(f"Complete your purchase - {BRAND}") + f"""
 {_nav("none")}
 <div class=auth-wrap><div class=auth-card>
 <h1>Review &amp; pay 🎉</h1>
 <p class=sub>Complete your <strong>{label}</strong> subscription to unlock your monthly limits.
 You can cancel any time.</p>
+{welcome_banner}
 
 <div class=co-lines>
   <div class=co-line><span>{label} plan</span><span id=co-base>{sym}{amount:,.0f}</span></div>
-  <div class=co-line id=co-disc-row style="display:none;color:var(--accent-hi)">
-    <span id=co-disc-label>Discount</span><span id=co-disc>-{sym}0</span></div>
+  <div class=co-line id=co-disc-row style="{disc_style}">
+    <span id=co-disc-label>{disc_label}</span><span id=co-disc>-{sym}{welcome_off:,.0f}</span></div>
   <div class=co-line id=co-gst-row {'style=display:none' if not tax else ''}>
     <span>GST (<span id=co-rate>{rate_disp:.0f}</span>%)</span><span id=co-gst>{sym}{tax:,.0f}</span></div>
   <div class="co-line co-total"><span>Total</span><span id=co-total>{sym}{total:,.0f}/mo</span></div>
 </div>
+{'<p class=co-renew-note>After the first month it renews at ' + f'{sym}{amount:,.0f}/mo.</p>' if has_welcome else ''}
 
 <div class=cpn-box>
-  <input id=cpn-in type=text placeholder="Discount code (optional)" autocomplete=off
+  <input id=cpn-in type=text placeholder="Have another code? (optional)" autocomplete=off
     oninput="this.value=this.value.toUpperCase()">
   <button type=button id=cpn-btn class="btn btn-ghost">Apply</button>
 </div>
@@ -3966,6 +3981,7 @@ You can cancel any time.</p>
   <input type=hidden name=plan value="{plan_key}">
   <input type=hidden name=recurring value="1">
   <input type=hidden name=coupon id=cpn-hidden value="">
+  <input type=hidden name=fp id=fp-hidden value="">
   <button class="btn btn-primary btn-block btn-lg" type=submit id=pay-btn>Pay {sym}{total:,.0f} &amp; activate</button>
 </form>
 <div class=auth-alt><a href="/dashboard">Skip for now - stay on Free</a></div>
@@ -3984,12 +4000,31 @@ background:var(--surface2);color:var(--fg);font-size:.95rem;text-transform:upper
 .cpn-msg{{font-size:.85rem;min-height:18px;margin-bottom:14px}}
 .cpn-msg.ok{{color:var(--accent-hi)}}
 .cpn-msg.err{{color:#ef4444}}
+.co-welcome{{background:var(--accent-dim);border:1px solid rgba(249,115,22,.3);
+border-radius:12px;padding:11px 14px;margin:4px 0 12px;font-size:.9rem;color:var(--fg)}}
+.co-renew-note{{font-size:.8rem;color:var(--muted);margin:-6px 0 14px;text-align:center}}
 </style>
 <script>
 (function(){{
   var plan="{plan_key}", sym="{sym}";
   var inEl=document.getElementById('cpn-in'), btn=document.getElementById('cpn-btn');
   var msg=document.getElementById('cpn-msg'), hidden=document.getElementById('cpn-hidden');
+  // Device fingerprint (abuse-tracking for the first-month welcome discount). A stable
+  // hash of coarse, non-PII browser signals - survives cookie/email changes on the same
+  // device without identifying the person. Best-effort; the server also checks IP + user.
+  try {{
+    var fp=[navigator.userAgent, navigator.language, screen.width+'x'+screen.height,
+            screen.colorDepth, new Date().getTimezoneOffset(),
+            navigator.hardwareConcurrency||0, navigator.platform||''];
+    try {{
+      var c=document.createElement('canvas'), x=c.getContext('2d');
+      x.textBaseline='top'; x.font="14px Arial"; x.fillText('wptaskify-fp',2,2);
+      fp.push(c.toDataURL().slice(-64));
+    }} catch(e){{}}
+    var str=fp.join('|'), h=5381;
+    for(var i=0;i<str.length;i++){{h=((h<<5)+h+str.charCodeAt(i))>>>0;}}
+    var el=document.getElementById('fp-hidden'); if(el) el.value=h.toString(16);
+  }} catch(e){{}}
   function money(n){{return sym+Math.round(n).toLocaleString();}}
   function apply(){{
     var code=(inEl.value||'').trim();
