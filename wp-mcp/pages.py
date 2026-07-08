@@ -4550,11 +4550,31 @@ def _affiliate_section(aff, public_url, csrf="", verified=True):
                 f'<tbody>{ph}</tbody></table></div>') if ph else ""
 
     minimum = 1000 if is_india else 20
+
+    # Per-plan earnings breakdown: what the referrer earns on each plan (rate % of the
+    # base/pre-tax price). Prices mirror the pricing page. Mini is India-only (INR).
+    _plans = [
+        ("Mini", 700, 9, True),        # (name, INR base, USD base, india_only)
+        ("Starter", 1699, 20, False),
+        ("Pro", 8299, 99, False),
+    ]
+    _earn_rows = ""
+    for _pn, _inr, _usd, _india_only in _plans:
+        if _india_only and not is_india:
+            continue
+        _price = _inr if is_india else _usd
+        _comm = _price * rate / 100.0
+        _earn_rows += (
+            f'<tr><td>{_pn}</td>'
+            f'<td style="text-align:right">{cur}{_price:,.0f}</td>'
+            f'<td style="text-align:right"><strong style="color:var(--accent-hi)">'
+            f'{cur}{_comm:,.0f}</strong></td></tr>')
+
     return f"""
 <div class=panel>
   <h2>Refer &amp; Earn</h2>
   <p class=hint>Share wptaskify and earn <strong>{rate:.0f}%</strong> commission on the first
-  payment of every paid customer you refer. It applies to any plan.</p>
+  payment of every paid customer you refer &mdash; on <strong>every plan</strong>.</p>
   <label class=aff-lbl>Your referral link</label>
   <div class=aff-link>
     <input id=afflink value="{_e_html(link)}" readonly onclick="this.select()">
@@ -4566,6 +4586,18 @@ def _affiliate_section(aff, public_url, csrf="", verified=True):
     <div class=aff-stat><b>{cur}{earned:,.0f}</b><span>Total earned</span></div>
     <div class="aff-stat hi"><b>{cur}{bal:,.0f}</b><span>Available balance</span></div>
   </div>
+</div>
+
+<div class=panel>
+  <h2>What you'll earn</h2>
+  <p class=hint>Your <strong>{rate:.0f}%</strong> commission on each plan a referred customer buys.
+  You earn it on their first payment.</p>
+  <table class="txn aff-earn"><thead><tr>
+    <th>Plan</th><th style="text-align:right">Customer pays</th>
+    <th style="text-align:right">You earn</th>
+  </tr></thead><tbody>{_earn_rows}</tbody></table>
+  <p class=hint style="margin-top:12px">Payouts via UPI, bank transfer or PayPal &mdash; minimum
+  {cur}{minimum:,.0f}. The more people you refer, the more you earn, month after month.</p>
 </div>
 
 <div class=panel>
@@ -4603,6 +4635,8 @@ def _affiliate_section(aff, public_url, csrf="", verified=True):
 .aff-stat span{{color:var(--muted);font-size:.82rem}}
 .aff-stat.hi{{background:var(--accent-dim);border-color:rgba(249,115,22,.3)}}
 .aff-stat.hi b{{color:var(--accent-hi)}}
+.aff-earn td,.aff-earn th{{padding:10px 12px}}
+.aff-earn tbody tr:last-child td{{font-weight:600}}
 </style>"""
 
 
