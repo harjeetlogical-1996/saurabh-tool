@@ -3057,6 +3057,9 @@ def pricing_page(country=""):
     ]
 
     _name2key = {"Free": "", "Mini": "owai_mini", "Starter": "owai_starter", "Pro": "owai_pro"}
+    # First-month welcome discount (auto-applied at checkout for new customers). Mirror the
+    # db.WELCOME_DISCOUNT table so the pricing page advertises the exact same offer.
+    _welcome = {"Starter": 30, "Pro": 40}
     cards = ""
     for i, (name, usd, inr, who, feats, feat, cta) in enumerate(plans):
         amt = inr if is_india else usd
@@ -3067,10 +3070,27 @@ def pricing_page(country=""):
         pkey = _name2key.get(name, "")
         # Paid plan -> signup remembering the plan (auto-checkout after verify).
         href = f"/?signup&plan={pkey}" if pkey else "/?signup"
+        # First-month discount badge + "first month" price (new customers only).
+        wpct = _welcome.get(name, 0)
+        price_block = f'<div class=amt>{amt}<span>/mo</span></div>'
+        promo_badge = ""
+        if wpct:
+            try:
+                _raw = float((amt or "0").lstrip("₹$").replace(",", ""))
+                _first = _raw * (100 - wpct) / 100.0
+                _fs = f"{_first:,.0f}" if is_india else f"{_first:,.2f}".rstrip("0").rstrip(".")
+            except (TypeError, ValueError):
+                _fs = ""
+            promo_badge = f'<div class=promo-badge>{wpct}% OFF 1st month</div>'
+            if _fs:
+                price_block = (
+                    f'<div class=amt><span class=amt-was>{amt}</span> {cur}{_fs}'
+                    f'<span>1st mo</span></div>'
+                    f'<p class=amt-then>then {amt}/mo &middot; new customers</p>')
         cards += (
-            f'<div class="{cls}">{tag}<h3>{name}</h3>'
+            f'<div class="{cls}">{tag}{promo_badge}<h3>{name}</h3>'
             f'<p class=price-who>{who}</p>'
-            f'<div class=amt>{amt}<span>/mo</span></div>'
+            f'{price_block}'
             f'<a href="{href}" class="btn {btn} btn-block">{cta}</a>'
             f'<ul>{lis}</ul>'
             f'<p class=price-all>{_CHECK} All 100+ tools included</p></div>')
@@ -3079,6 +3099,8 @@ def pricing_page(country=""):
     # Plain-HTML declarative price sentence (AEO - always both currencies for machines).
     aeo_prices = ("wptaskify pricing (2026): Free $0, Starter $20/month, Pro $99/month. "
                   "In India: Free ₹0, Mini ₹700, Starter ₹1,699, Pro ₹8,299 per month. "
+                  "New customers get an automatic first-month discount: 30% off Starter and "
+                  "40% off Pro (applied at checkout, first month only). "
                   "Every plan includes all 100+ WordPress tools; you bring your own Claude or "
                   "ChatGPT, so there is no extra AI subscription.")
 
@@ -3114,6 +3136,8 @@ def pricing_page(country=""):
     faqs = [
         ("How much does wptaskify cost?",
          f"Plans start free. Paid plans are Starter at {'₹1,699' if is_india else '$20'}/month and Pro at {'₹8,299' if is_india else '$99'}/month{', with an India-only Mini plan at ₹700/month' if is_india else ''}. Every plan includes all 100+ tools."),
+        ("Is there a discount for new customers?",
+         "Yes. New customers get an automatic first-month discount - 30% off Starter and 40% off Pro - applied at checkout, no code needed. It's a one-time welcome offer on your first month; the plan then renews at the normal monthly price."),
         ("Is there really a free plan?",
          "Yes - free forever, no credit card required. You get all 100+ tools on 1 site, with 100 AI actions and 5 AI images a month."),
         ("Do I need to pay for AI separately?",
@@ -3187,7 +3211,13 @@ def pricing_page(country=""):
 /* pricing card internal rhythm - even gaps, aligned rows */
 .prices .price h3{{margin-bottom:2px}}
 .price-who{{color:#8A8792;font-size:.9rem;margin:0 0 16px;min-height:1.2em}}
-.prices .price .amt{{margin-bottom:20px}}
+.prices .price .amt{{margin-bottom:6px}}
+/* first-month discount badge + strikethrough price */
+.promo-badge{{position:absolute;top:14px;right:14px;background:#16a34a;color:#fff;
+  font-family:'Sora';font-weight:700;font-size:.68rem;letter-spacing:.02em;
+  padding:4px 9px;border-radius:999px;box-shadow:0 4px 12px -4px rgba(22,163,74,.5)}}
+.amt-was{{font-size:1.15rem;color:#B4B1BE;text-decoration:line-through;font-weight:600;margin-right:4px}}
+.amt-then{{color:#16a34a;font-size:.82rem;font-weight:600;margin:0 0 18px}}
 .prices .price .btn-block{{margin-bottom:4px}}
 .prices .price ul{{margin:20px 0 0}}
 .price-all{{display:flex;gap:8px;align-items:center;color:#5B5966;font-size:.86rem;margin:16px 0 0;
