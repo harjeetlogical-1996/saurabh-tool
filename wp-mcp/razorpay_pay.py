@@ -192,6 +192,29 @@ def extract_notes(event):
     return {}
 
 
+def extract_amount(event):
+    """Return the ACTUALLY captured amount as (major_units, currency) e.g. (99.0, 'USD'),
+    or (None, '') if not present. Razorpay amounts are in the smallest unit (paise/cents)."""
+    entity = (event.get("payload", {}) or {})
+    pay = (entity.get("payment", {}) or {}).get("entity", {})
+    if pay.get("amount") is not None:
+        cur = (pay.get("currency") or "").upper()
+        try:
+            return (int(pay["amount"]) / 100.0, cur)
+        except (TypeError, ValueError):
+            pass
+    pl = (entity.get("payment_link", {}) or {}).get("entity", {})
+    # payment_link.paid carries amount_paid (smallest unit)
+    amt = pl.get("amount_paid", pl.get("amount"))
+    if amt is not None:
+        cur = (pl.get("currency") or "").upper()
+        try:
+            return (int(amt) / 100.0, cur)
+        except (TypeError, ValueError):
+            pass
+    return (None, "")
+
+
 def extract_payment_id(event):
     """A stable id identifying the underlying PAYMENT, so all events for one purchase
     (payment_link.paid, payment.captured, order.paid) dedupe to the same key. Prefer the

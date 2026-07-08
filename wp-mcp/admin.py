@@ -282,6 +282,7 @@ _ICONS = {
     "forum": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     "aff": '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.7" x2="15.4" y2="6.3"/><line x1="8.6" y1="13.3" x2="15.4" y2="17.7"/>',
     "blog": '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
+    "leads": '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>',
 }
 
 
@@ -297,6 +298,7 @@ def _shell(title, active, inner, flash=""):
         for key, href, label in [
             ("dash", "", "Dashboard"),
             ("users", "/users", "Users"),
+            ("leads", "/leads", "Leads"),
             ("pay", "/payments", "Payments"),
             ("plans", "/plans", "Plans"),
             ("coupon", "/coupons", "Coupons"),
@@ -755,8 +757,10 @@ def user_detail_page(user_id, flash=""):
         if t["status"] == "completed":
             refund = (
                 f'<form method=post action="{b}/txn/{t["id"]}/refund" '
-                f'onsubmit="return confirm(\'Mark this transaction refunded?\')">'
-                f'<button class="btn danger mini" type=submit>Refund</button></form>')
+                f'onsubmit="return confirm(\'Revoke this plan/credits? This ONLY reverses '
+                f'the account (plan, credits, commission) - it does NOT return money. '
+                f'Issue the actual refund in the Razorpay/Stripe dashboard separately.\')">'
+                f'<button class="btn danger mini" type=submit>Revoke</button></form>')
         else:
             refund = '<span class=muted>—</span>'
         txn_rows += (
@@ -828,8 +832,9 @@ def payments_page(flash=""):
         f'<div class=card><div class=tbl-wrap><table><thead><tr>'
         f'<th>Date</th><th>User</th><th>Item</th><th>Amount</th><th>Provider</th>'
         f'<th>Status</th></tr></thead><tbody>{rows}</tbody></table></div></div>'
-        f'<p class=muted style="font-size:.85rem">To refund a payment, open the '
-        f'user and use the Refund button on their transaction.</p>'
+        f'<p class=muted style="font-size:.85rem">The <b>Revoke</b> button reverses the '
+        f'account (plan, credits, affiliate commission) but does <b>not</b> return money - '
+        f'issue the actual refund in the Razorpay/Stripe dashboard.</p>'
     ), flash)
 
 
@@ -956,6 +961,61 @@ def system_page(status: dict, flash=""):
         f'configuration.</p>'
         f'{note}'
         f'<div class=card><h2>Services</h2><div class=sys-rows>{rows}</div></div>'
+    ), flash)
+
+
+def leads_page(flash="", status=""):
+    """Contact-form leads/queries from the public /contact page."""
+    b = base_path()
+    counts = db.admin_contact_counts()
+    leads = db.admin_list_contacts(limit=200, status=status)
+    svc_lbl = {
+        "custom-ai-tools": "Custom AI tool", "wordpress-ai-setup": "AI integration",
+        "ai-content-writing": "AI app / content", "ai-seo-optimization": "AI SEO",
+        "": "General",
+    }
+    rows = ""
+    for m in leads:
+        cls = "new" if m["status"] == "new" else ""
+        svc = svc_lbl.get(m["service"], _e(m["service"]) or "General")
+        when = _e(m["created_at"][:16].replace("T", " "))
+        msg = _e(m["message"])
+        rows += (
+            f'<tr class="{cls}">'
+            f'<td style="white-space:nowrap">{when}</td>'
+            f'<td><b>{_e(m["name"])}</b><br><a href="mailto:{_e(m["email"])}">{_e(m["email"])}</a></td>'
+            f'<td><span class="pill">{svc}</span></td>'
+            f'<td style="max-width:420px">{msg}</td>'
+            f'<td><span class="pill {"paid" if m["status"]=="new" else "free"}">{_e(m["status"])}</span></td>'
+            f'<td style="white-space:nowrap">'
+            f'<form method=post action="{b}/leads/status" style="display:inline">'
+            f'<input type=hidden name=id value="{m["id"]}">'
+            f'<input type=hidden name=status value="read">'
+            f'<button class="btn mini" type=submit>Mark read</button></form> '
+            f'<form method=post action="{b}/leads/status" style="display:inline">'
+            f'<input type=hidden name=id value="{m["id"]}">'
+            f'<input type=hidden name=status value="archived">'
+            f'<button class="btn mini danger" type=submit>Archive</button></form>'
+            f'</td></tr>')
+    if not rows:
+        rows = '<tr><td colspan=6 style="text-align:center;color:var(--muted2);padding:30px">No leads yet.</td></tr>'
+
+    filt = (f'<div class=row style="gap:8px;margin-bottom:14px">'
+            f'<a class="btn {"secondary" if status else ""}" href="{b}/leads">All ({counts["total"]})</a>'
+            f'<a class="btn {"secondary" if status!="new" else ""}" href="{b}/leads?status=new">New ({counts["new"]})</a>'
+            f'</div>')
+
+    return _shell("Leads", "leads", (
+        f'<h1>Leads &amp; queries</h1>'
+        f'<p class=sub>Messages from your public contact form. '
+        f'<b>{counts["new"]}</b> new · {counts["total"]} total.</p>'
+        f'{filt}'
+        f'<div class=card><div class=tbl-wrap><table><thead><tr>'
+        f'<th>When</th><th>From</th><th>About</th><th>Message</th><th>Status</th><th></th>'
+        f'</tr></thead><tbody>{rows}</tbody></table></div></div>'
+        f'<style>tr.new td{{background:#F5F8FF}}'
+        f'.btn.mini{{padding:5px 10px;font-size:.8rem}}'
+        f'.btn.mini.danger{{color:var(--red);border-color:#F3C9C9}}</style>'
     ), flash)
 
 

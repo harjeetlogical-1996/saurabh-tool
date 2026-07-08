@@ -36,11 +36,50 @@ from mcp.server.fastmcp import FastMCP
 
 current_tenant: contextvars.ContextVar = contextvars.ContextVar("current_tenant", default=None)
 
+# Per-CALL site override. When a tool is given a `site` argument, we resolve that
+# site's credentials once and stash a temporary tenant config here for the duration
+# of that single tool call. This lets two different chats target two different
+# sites at the same time (one connector), WITHOUT changing the account-wide active
+# site that `use_site` sets. _cfg() prefers this override when present.
+_call_site_cfg: contextvars.ContextVar = contextvars.ContextVar("_call_site_cfg", default=None)
+# Tiny cache so repeated calls with the same `site` in one chat don't re-hit the DB.
+_site_cfg_cache = {}
+
+
+def _apply_site(site: str):
+    """If a tool was called with a non-empty `site`, switch THIS call to that site's
+    credentials (per-call, does not persist). No-op when `site` is blank. Raises a
+    clear error if the site name doesn't match any connected site."""
+    site = (site or "").strip()
+    if not site:
+        _call_site_cfg.set(None)
+        return
+    base = current_tenant.get() or _DEFAULT_TENANT
+    uid = (base or {}).get("user_id", "")
+    key = (uid, site.lower())
+    over = _site_cfg_cache.get(key)
+    if over is None:
+        import db as _db
+        import base64 as _b64
+        match = _db.get_site_by_ref(uid, site) if uid else None
+        if not match:
+            raise RuntimeError(
+                f"site '{site}' is not one of your connected sites. "
+                "Use list_my_sites to see the exact URLs.")
+        token = _b64.b64encode(
+            f"{match['wp_username']}:{match['app_password'].replace(' ', '')}".encode()).decode()
+        over = dict(base or {})
+        over["site_url"] = match["site_url"].rstrip("/")
+        over["base_headers"] = {"Authorization": "Basic " + token, "User-Agent": "wp-mcp/3.0"}
+        _site_cfg_cache[key] = over
+    _call_site_cfg.set(over)
+
 
 def make_tenant_config(site_url: str, username: str, app_password: str,
                        gemini_api_key: str = "", user_id: str = "", credit_hook=None,
                        toolcall_hook=None, approval_hook=None, approval_status_hook=None,
-                       balance_hook=None, credit_refund_hook=None, toolcall_refund_hook=None):
+                       balance_hook=None, credit_refund_hook=None, toolcall_refund_hook=None,
+                       plan: str = ""):
     """Build a tenant config dict with precomputed auth header.
     credit_hook() -> bool: consume 1 image credit (image tools).
     credit_refund_hook(): give back 1 image credit (call if generation failed).
@@ -57,6 +96,7 @@ def make_tenant_config(site_url: str, username: str, app_password: str,
         "base_headers": {"Authorization": "Basic " + token, "User-Agent": "wp-mcp/3.0"},
         "gemini_api_key": gemini_api_key or os.environ.get("GEMINI_API_KEY", ""),
         "user_id": user_id,
+        "plan": plan or "free",
         "credit_hook": credit_hook,
         "credit_refund_hook": credit_refund_hook,
         "toolcall_hook": toolcall_hook,
@@ -108,7 +148,12 @@ if os.environ.get("WP_SITE_URL") and os.environ.get("WP_APP_PASSWORD"):
 
 
 def _cfg():
-    """Return the current request's tenant config. FAIL-CLOSED."""
+    """Return the tenant config for the current tool call. Prefers a per-call
+    `site` override (set by _apply_site) so one chat can target a specific site
+    without affecting others; otherwise the request's resolved tenant. FAIL-CLOSED."""
+    over = _call_site_cfg.get()
+    if over is not None:
+        return over
     cfg = current_tenant.get()
     if cfg is None:
         cfg = _DEFAULT_TENANT
@@ -117,10 +162,46 @@ def _cfg():
             "No tenant context: this request is not bound to any WordPress site. "
             "Connect a site first (multi-tenant) or set WP_* env vars (standalone)."
         )
+    # Valid account but no WordPress site connected yet -> clear, friendly guidance
+    # instead of a cryptic auth failure.
+    if cfg.get("no_site"):
+        raise RuntimeError(
+            "No WordPress site is connected to your wptaskify account yet. "
+            "To use this, first add your site: install the free wptaskify plugin on "
+            "your WordPress site and click Connect (or add it from your wptaskify "
+            "dashboard). Then try again.")
     return cfg
 
 
 mcp = FastMCP("wptaskify")
+
+
+# ---------------------------------------------------------------------------
+# Plan-based tool gating
+# ---------------------------------------------------------------------------
+# Tiers (least -> most): "free" tools work on every plan. "paid" tools need any
+# paid plan (Mini/Starter/Pro). "pro" tools (Studio: file/theme/plugin editing)
+# need the Pro plan. A tool with no explicit tier is treated as "free".
+_PAID_PLANS = {"owai_mini", "owai_starter", "owai_pro", "pro", "agency",
+               "chat_starter", "chat_pro", "chat_max"}
+_PRO_PLANS = {"owai_pro", "agency", "chat_max"}
+
+
+def _require_tier(tier: str):
+    """Raise a friendly upgrade message if the current plan can't use this tool.
+    Called at the top of gated (paid/pro) tools."""
+    plan = (_cfg().get("plan") or "free").lower()
+    if tier == "pro":
+        if plan not in _PRO_PLANS:
+            raise RuntimeError(
+                "This is a Pro feature (Studio: creating/editing themes, plugins and "
+                "files). Upgrade to the Pro plan in your wptaskify dashboard to use it.")
+    elif tier == "paid":
+        if plan == "free":
+            raise RuntimeError(
+                "This tool needs a paid plan. The free plan includes read-only SEO tools "
+                "(list/get content, SEO audit, SEO score). Upgrade in your wptaskify "
+                "dashboard to publish, run bulk actions, generate images and more.")
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +217,19 @@ def _request(method, path, payload=None, params=None, raw_body=None, extra_heade
             "Monthly tool-call limit reached for your plan. Upgrade your plan, "
             "or switch to a Built-in Chat plan for token-based usage."
         )
-    url = cfg["site_url"] + "/wp-json" + path
+    base = cfg["site_url"].rstrip("/")
+    # Two ways WordPress serves the REST API:
+    #  - pretty:  {site}/wp-json/{path}?{params}     (needs pretty permalinks)
+    #  - plain:   {site}/?rest_route=/{path}&{params} (always works, even if a cache
+    #             flush / plugin update broke the /wp-json/ rewrite rules)
+    # We try pretty first; if it 404s (the classic "broke permalinks" symptom) we
+    # transparently retry via ?rest_route= so tools keep working.
+    _qs = ("?" + urllib.parse.urlencode(params)) if params else ""
+    url = base + "/wp-json" + path + _qs
+    _pmap = {"rest_route": path}
     if params:
-        url += "?" + urllib.parse.urlencode(params)
+        _pmap.update(params)
+    url_plain = base + "/?" + urllib.parse.urlencode(_pmap)
     headers = dict(cfg["base_headers"])
     if extra_headers:
         headers.update(extra_headers)
@@ -158,7 +249,12 @@ def _request(method, path, payload=None, params=None, raw_body=None, extra_heade
             except Exception:
                 pass
 
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    def _do(u):
+        r = urllib.request.Request(u, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(r, timeout=120) as resp:
+            body = resp.read().decode()
+            return json.loads(body) if body else {}
+
     # Transient network hiccups (timeout, connection reset, temporary DNS) made
     # read-only tools like list_studio_backups fail on one call and succeed on the
     # next. Retry idempotent GETs a couple of times on NETWORK errors only - never
@@ -169,10 +265,25 @@ def _request(method, path, payload=None, params=None, raw_body=None, extra_heade
     last_exc = None
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                body = r.read().decode()
-                return json.loads(body) if body else {}
+            return _do(url)
         except urllib.error.HTTPError as e:
+            # A 404 on /wp-json/ almost always means the permalink rewrite broke
+            # (LiteSpeed/cache flush, plugin update). The ?rest_route= form doesn't
+            # rely on rewrites, so try it once before giving up - keeps every tool
+            # working even when the site's pretty permalinks are broken.
+            if e.code == 404 and url_plain != url:
+                try:
+                    return _do(url_plain)
+                except urllib.error.HTTPError as e2:
+                    _refund_call()
+                    raise RuntimeError(f"WP API {e2.code}: {e2.read().decode()[:600]}")
+                except Exception as e2:  # noqa: BLE001
+                    last_exc = e2
+                    if attempt < attempts - 1:
+                        _time.sleep(0.6 * (attempt + 1))
+                        continue
+                    _refund_call()
+                    raise RuntimeError(f"Request failed: {type(e2).__name__}: {e2}")
             _refund_call()
             raise RuntimeError(f"WP API {e.code}: {e.read().decode()[:600]}")
         except Exception as e:  # noqa: BLE001 - network-level failure
@@ -209,9 +320,10 @@ def _slim_post(p):
 # POSTS
 # ===========================================================================
 @mcp.tool()
-def list_posts(search: str = "", status: str = "publish,draft", per_page: int = 10, page: int = 1) -> str:
+def list_posts(search: str = "", status: str = "publish,draft", per_page: int = 10, page: int = 1, site: str = "") -> str:
     """List posts. Filter by `search` text and `status` (publish,draft,pending,private,future).
     Returns id, title, status, link, categories, tags. Use to find a post ID before editing."""
+    _apply_site(site)
     params = {"per_page": min(per_page, 50), "page": page, "status": status, "context": "edit"}
     if search:
         params["search"] = search
@@ -219,9 +331,10 @@ def list_posts(search: str = "", status: str = "publish,draft", per_page: int = 
 
 
 @mcp.tool()
-def get_post(post_id: int) -> str:
+def get_post(post_id: int, site: str = "") -> str:
     """Get one post's FULL raw content (HTML) + title, excerpt, status, categories,
     tags, featured image id. Read this before editing."""
+    _apply_site(site)
     p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     return json.dumps({
         "id": p.get("id"),
@@ -239,9 +352,11 @@ def get_post(post_id: int) -> str:
 
 @mcp.tool()
 def create_post(title: str, content: str, status: str = "draft", excerpt: str = "",
-                category_ids: str = "", tag_ids: str = "", featured_media_id: int = 0) -> str:
+                category_ids: str = "", tag_ids: str = "", featured_media_id: int = 0, site: str = "") -> str:
     """Create a post. status defaults to 'draft' (safe). content is HTML.
     category_ids / tag_ids = comma-separated IDs (e.g. '3,7'). featured_media_id = media ID for thumbnail."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {"title": title, "content": content, "status": status}
     if excerpt:
         payload["excerpt"] = excerpt
@@ -257,9 +372,11 @@ def create_post(title: str, content: str, status: str = "draft", excerpt: str = 
 @mcp.tool()
 def update_post(post_id: int, title: str = "", content: str = "", status: str = "",
                 excerpt: str = "", category_ids: str = "", tag_ids: str = "",
-                featured_media_id: int = 0) -> str:
+                featured_media_id: int = 0, site: str = "") -> str:
     """Edit a post by ID. Only non-empty fields change. content replaces whole body (HTML).
     Pass status='publish' to make a draft live. category_ids/tag_ids = comma-separated IDs."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {}
     if title:
         payload["title"] = title
@@ -281,8 +398,10 @@ def update_post(post_id: int, title: str = "", content: str = "", status: str = 
 
 
 @mcp.tool()
-def delete_post(post_id: int, permanent: bool = False) -> str:
+def delete_post(post_id: int, permanent: bool = False, site: str = "") -> str:
     """Delete a post. Default = move to Trash (recoverable). permanent=True = delete forever."""
+    _require_tier('paid')
+    _apply_site(site)
     _v2("DELETE", f"/posts/{post_id}", params={"force": "true"} if permanent else None)
     return json.dumps({"id": post_id, "result": "deleted" if permanent else "trashed"})
 
@@ -291,10 +410,12 @@ def delete_post(post_id: int, permanent: bool = False) -> str:
 # BULK FIND & REPLACE
 # ===========================================================================
 @mcp.tool()
-def bulk_find_replace(find: str, replace: str, dry_run: bool = True, status: str = "publish,draft", limit: int = 200) -> str:
+def bulk_find_replace(find: str, replace: str, dry_run: bool = True, status: str = "publish,draft", limit: int = 200, site: str = "") -> str:
     """Find `find` text across ALL posts' content and replace with `replace`.
     dry_run=True (default) only REPORTS which posts would change (does NOT edit).
     Run with dry_run=False to actually apply. Always dry-run first, show the user, then apply."""
+    _require_tier('paid')
+    _apply_site(site)
     changed = []
     page = 1
     scanned = 0
@@ -366,9 +487,10 @@ def _content_text(raw_html):
 
 
 @mcp.tool()
-def get_post_schema(post_id: int) -> str:
+def get_post_schema(post_id: int, site: str = "") -> str:
     """Extract ONLY the JSON-LD schema block(s) from a post's content.
     Use this to read/inspect a post's structured data without the full article."""
+    _apply_site(site)
     p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     blocks = _SCHEMA_RE.findall(raw)
@@ -380,10 +502,12 @@ def get_post_schema(post_id: int) -> str:
 
 
 @mcp.tool()
-def update_post_schema(post_id: int, new_schema_script: str) -> str:
+def update_post_schema(post_id: int, new_schema_script: str, site: str = "") -> str:
     """Replace ONLY the JSON-LD schema block in a post, leaving the article body
     untouched. `new_schema_script` must be a full <script type="application/ld+json">
     ... </script> tag. If the post has no schema yet, it is appended at the end."""
+    _require_tier('paid')
+    _apply_site(site)
     p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     if _SCHEMA_RE.search(raw):
@@ -397,11 +521,13 @@ def update_post_schema(post_id: int, new_schema_script: str) -> str:
 
 
 @mcp.tool()
-def update_post_body_keep_schema(post_id: int, new_content: str) -> str:
+def update_post_body_keep_schema(post_id: int, new_content: str, site: str = "") -> str:
     """Replace the article body but PRESERVE the existing JSON-LD schema block.
     Pass `new_content` as the new article HTML WITHOUT schema; the post's current
     schema <script> is automatically re-appended so structured data is not lost.
     Use this for normal content edits on this site."""
+    _require_tier('paid')
+    _apply_site(site)
     p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     blocks = _SCHEMA_RE.findall(raw)
@@ -417,8 +543,9 @@ def update_post_body_keep_schema(post_id: int, new_content: str) -> str:
 # MEDIA / FEATURED IMAGE
 # ===========================================================================
 @mcp.tool()
-def list_media(search: str = "", per_page: int = 10) -> str:
+def list_media(search: str = "", per_page: int = 10, site: str = "") -> str:
     """List media library items (images). Returns id, title, source_url, mime_type."""
+    _apply_site(site)
     params = {"per_page": min(per_page, 50), "context": "edit"}
     if search:
         params["search"] = search
@@ -429,9 +556,11 @@ def list_media(search: str = "", per_page: int = 10) -> str:
 
 
 @mcp.tool()
-def upload_media_from_url(image_url: str, filename: str = "", alt_text: str = "") -> str:
+def upload_media_from_url(image_url: str, filename: str = "", alt_text: str = "", site: str = "") -> str:
     """Download an image from a public URL and upload it to the WP media library.
     Returns the new media id (use it as featured_media_id when creating/updating a post)."""
+    _require_tier('paid')
+    _apply_site(site)
     with urllib.request.urlopen(image_url, timeout=120) as r:
         data = r.read()
         ctype = r.headers.get("Content-Type", "image/jpeg")
@@ -452,15 +581,19 @@ def upload_media_from_url(image_url: str, filename: str = "", alt_text: str = ""
 
 
 @mcp.tool()
-def set_featured_image(post_id: int, media_id: int) -> str:
+def set_featured_image(post_id: int, media_id: int, site: str = "") -> str:
     """Set a post's featured image (thumbnail) to an existing media item id."""
+    _require_tier('paid')
+    _apply_site(site)
     p = _v2("POST", f"/posts/{post_id}", payload={"featured_media": media_id})
     return json.dumps({"post_id": post_id, "featured_media": p.get("featured_media")})
 
 
 @mcp.tool()
-def delete_media(media_id: int) -> str:
+def delete_media(media_id: int, site: str = "") -> str:
     """Permanently delete a media item by id."""
+    _require_tier('paid')
+    _apply_site(site)
     _v2("DELETE", f"/media/{media_id}", params={"force": "true"})
     return json.dumps({"id": media_id, "result": "deleted"})
 
@@ -537,12 +670,14 @@ def _gemini_generate_image(prompt: str) -> bytes:
 
 
 @mcp.tool()
-def generate_featured_image(post_id: int, prompt: str = "", set_as_featured: bool = True) -> str:
+def generate_featured_image(post_id: int, prompt: str = "", set_as_featured: bool = True, site: str = "") -> str:
     """Generate a REALISTIC PHOTO featured image with Google Gemini and attach it
     to a post. If `prompt` is empty, an automatic prompt is built from the post's
     title (realistic water/hydration photography style). The image is uploaded to
     the WP media library and (by default) set as the post's featured image.
     Returns the new media id + url."""
+    _require_tier('paid')
+    _apply_site(site)
     # Build prompt from title if not provided
     p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     title = (p.get("title") or {}).get("raw", "") or (p.get("title") or {}).get("rendered", "")
@@ -577,10 +712,12 @@ def generate_featured_image(post_id: int, prompt: str = "", set_as_featured: boo
 
 
 @mcp.tool()
-def generate_image_standalone(prompt: str, filename: str = "ai-image") -> str:
+def generate_image_standalone(prompt: str, filename: str = "ai-image", site: str = "") -> str:
     """Generate a realistic image with Gemini from a free-text prompt and upload it
     to the media library (NOT attached to any post). Returns media id + url.
     Use when you just need an image in the library."""
+    _require_tier('paid')
+    _apply_site(site)
     img_bytes = _gemini_generate_image(prompt)
     safe = _re.sub(r"[^a-zA-Z0-9]+", "-", filename.lower()).strip("-")[:60] or "ai-image"
     media = _request("POST", "/wp/v2/media", raw_body=img_bytes, extra_headers={
@@ -598,16 +735,19 @@ def generate_image_standalone(prompt: str, filename: str = "ai-image") -> str:
 # CATEGORIES & TAGS
 # ===========================================================================
 @mcp.tool()
-def list_categories(per_page: int = 100) -> str:
+def list_categories(per_page: int = 100, site: str = "") -> str:
     """List all categories with id, name, count, slug. Use IDs when assigning to posts."""
+    _apply_site(site)
     cats = _v2("GET", "/categories", params={"per_page": per_page})
     return json.dumps([{"id": c["id"], "name": c["name"], "count": c["count"], "slug": c["slug"]} for c in cats],
                       indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
-def create_category(name: str, description: str = "", parent_id: int = 0) -> str:
+def create_category(name: str, description: str = "", parent_id: int = 0, site: str = "") -> str:
     """Create a new category. Returns its id."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {"name": name}
     if description:
         payload["description"] = description
@@ -618,8 +758,9 @@ def create_category(name: str, description: str = "", parent_id: int = 0) -> str
 
 
 @mcp.tool()
-def list_tags(search: str = "", per_page: int = 100) -> str:
+def list_tags(search: str = "", per_page: int = 100, site: str = "") -> str:
     """List tags with id, name, count, slug. Optionally filter by `search`."""
+    _apply_site(site)
     params = {"per_page": per_page}
     if search:
         params["search"] = search
@@ -629,8 +770,10 @@ def list_tags(search: str = "", per_page: int = 100) -> str:
 
 
 @mcp.tool()
-def create_tag(name: str, description: str = "") -> str:
+def create_tag(name: str, description: str = "", site: str = "") -> str:
     """Create a new tag. Returns its id."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {"name": name}
     if description:
         payload["description"] = description
@@ -642,8 +785,9 @@ def create_tag(name: str, description: str = "") -> str:
 # PAGES
 # ===========================================================================
 @mcp.tool()
-def list_pages(search: str = "", status: str = "publish,draft", per_page: int = 20) -> str:
+def list_pages(search: str = "", status: str = "publish,draft", per_page: int = 20, site: str = "") -> str:
     """List pages (About, calculators, etc.). Returns id, title, status, link."""
+    _apply_site(site)
     params = {"per_page": min(per_page, 50), "status": status, "context": "edit"}
     if search:
         params["search"] = search
@@ -651,8 +795,9 @@ def list_pages(search: str = "", status: str = "publish,draft", per_page: int = 
 
 
 @mcp.tool()
-def get_page(page_id: int) -> str:
+def get_page(page_id: int, site: str = "") -> str:
     """Get one page's full raw HTML content + title, status."""
+    _apply_site(site)
     p = _v2("GET", f"/pages/{page_id}", params={"context": "edit"})
     return json.dumps({"id": p["id"], "title": (p.get("title") or {}).get("raw", ""),
                        "status": p.get("status"), "link": p.get("link"),
@@ -660,8 +805,10 @@ def get_page(page_id: int) -> str:
 
 
 @mcp.tool()
-def update_page(page_id: int, title: str = "", content: str = "", status: str = "") -> str:
+def update_page(page_id: int, title: str = "", content: str = "", status: str = "", site: str = "") -> str:
     """Edit a page by ID. Only non-empty fields change. content replaces whole body (HTML)."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {}
     if title:
         payload["title"] = title
@@ -675,7 +822,7 @@ def update_page(page_id: int, title: str = "", content: str = "", status: str = 
 
 
 @mcp.tool()
-def create_page(title: str, content: str, status: str = "draft") -> str:
+def create_page(title: str, content: str, status: str = "draft", site: str = "") -> str:
     """Create a new page. status defaults to draft. content is HTML (Gutenberg
     block markup works too).
 
@@ -685,17 +832,30 @@ def create_page(title: str, content: str, status: str = "draft") -> str:
     a small cohesive palette, cards/columns with soft shadow + radius, buttons
     with hover states, SVG icons (not emoji), and a fully responsive mobile-first
     layout. Keep the style consistent and professional - not a plain wall of text."""
+    _require_tier('paid')
+    _apply_site(site)
     return json.dumps(_slim_post(_v2("POST", "/pages", payload={"title": title, "content": content, "status": status})),
                       indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_page(page_id: int, permanent: bool = False, site: str = "") -> str:
+    """Delete a PAGE. Default = move to Trash (recoverable). permanent=True = delete
+    forever. Use list_pages to find the page ID. (For posts, use delete_post.)"""
+    _require_tier('paid')
+    _apply_site(site)
+    _v2("DELETE", f"/pages/{page_id}", params={"force": "true"} if permanent else None)
+    return json.dumps({"id": page_id, "result": "deleted" if permanent else "trashed"})
 
 
 # ===========================================================================
 # COMMENTS
 # ===========================================================================
 @mcp.tool()
-def list_comments(status: str = "hold", per_page: int = 20) -> str:
+def list_comments(status: str = "hold", per_page: int = 20, site: str = "") -> str:
     """List comments. status = hold (pending), approve, spam, trash, all.
     Returns id, author, content snippet, post id, status."""
+    _apply_site(site)
     params = {"per_page": min(per_page, 50), "context": "edit"}
     if status != "all":
         params["status"] = status
@@ -707,8 +867,10 @@ def list_comments(status: str = "hold", per_page: int = 20) -> str:
 
 
 @mcp.tool()
-def moderate_comment(comment_id: int, action: str) -> str:
+def moderate_comment(comment_id: int, action: str, site: str = "") -> str:
     """Moderate a comment. action = approve, hold, spam, trash, delete."""
+    _require_tier('paid')
+    _apply_site(site)
     if action == "delete":
         _v2("DELETE", f"/comments/{comment_id}", params={"force": "true"})
         return json.dumps({"id": comment_id, "result": "deleted"})
@@ -723,17 +885,20 @@ def moderate_comment(comment_id: int, action: str) -> str:
 # AUTHORS
 # ===========================================================================
 @mcp.tool()
-def list_authors() -> str:
+def list_authors(site: str = "") -> str:
     """List all authors/users (id, name, role). Use the id with set_post_author."""
+    _apply_site(site)
     users = _v2("GET", "/users", params={"per_page": 50, "context": "edit"})
     return json.dumps([{"id": u["id"], "name": u.get("name"), "roles": u.get("roles")} for u in users],
                       indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
-def set_post_author(post_id: int, author_id: int) -> str:
+def set_post_author(post_id: int, author_id: int, site: str = "") -> str:
     """Set/change the author of a post (use list_authors to get the id).
     Good for E-E-A-T - assign the right expert to each article."""
+    _require_tier('paid')
+    _apply_site(site)
     p = _v2("POST", f"/posts/{post_id}", payload={"author": author_id})
     return json.dumps({"post_id": post_id, "author": p.get("author")})
 
@@ -742,18 +907,22 @@ def set_post_author(post_id: int, author_id: int) -> str:
 # SCHEDULED / FUTURE PUBLISH
 # ===========================================================================
 @mcp.tool()
-def schedule_post(post_id: int, datetime_iso: str) -> str:
+def schedule_post(post_id: int, datetime_iso: str, site: str = "") -> str:
     """Schedule a post to auto-publish at a future time. `datetime_iso` must be
     site-local time in ISO format, e.g. '2026-07-15T09:00:00'. Sets status=future."""
+    _require_tier('paid')
+    _apply_site(site)
     p = _v2("POST", f"/posts/{post_id}", payload={"status": "future", "date": datetime_iso})
     return json.dumps({"post_id": post_id, "status": p.get("status"), "scheduled_for": p.get("date")})
 
 
 @mcp.tool()
-def bulk_schedule_posts(schedule_json: str) -> str:
+def bulk_schedule_posts(schedule_json: str, site: str = "") -> str:
     """Schedule MANY posts at once. `schedule_json` is a JSON array of
     {"post_id": N, "datetime_iso": "2026-07-15T09:00:00"} (site-local time).
     Sets each to status=future. Returns per-post result."""
+    _require_tier('paid')
+    _apply_site(site)
     try:
         items = json.loads(schedule_json)
     except Exception:
@@ -773,10 +942,12 @@ def bulk_schedule_posts(schedule_json: str) -> str:
 
 
 @mcp.tool()
-def duplicate_post(post_id: int, new_title: str = "") -> str:
+def duplicate_post(post_id: int, new_title: str = "", site: str = "") -> str:
     """Clone a post (great for templates): copies title, content, excerpt,
     categories and tags into a NEW draft. Pass new_title to rename the copy.
     Returns the new post id."""
+    _require_tier('paid')
+    _apply_site(site)
     src = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     payload = {
         "title": new_title or ((src.get("title") or {}).get("raw", "") + " (copy)"),
@@ -792,10 +963,12 @@ def duplicate_post(post_id: int, new_title: str = "") -> str:
 
 @mcp.tool()
 def bulk_assign_terms(post_ids: str, category_ids: str = "", tag_ids: str = "",
-                      replace: bool = False) -> str:
+                      replace: bool = False, site: str = "") -> str:
     """Assign categories and/or tags to MANY posts at once. `post_ids`,
     `category_ids`, `tag_ids` are comma-separated id lists. By default terms are
     ADDED; set replace=True to replace existing ones. Returns per-post result."""
+    _require_tier('paid')
+    _apply_site(site)
     def _ids(s):
         return [int(x) for x in str(s).split(",") if x.strip().isdigit()]
     pids = _ids(post_ids)
@@ -823,8 +996,9 @@ def bulk_assign_terms(post_ids: str, category_ids: str = "", tag_ids: str = "",
 
 
 @mcp.tool()
-def list_users(per_page: int = 50) -> str:
+def list_users(per_page: int = 50, site: str = "") -> str:
     """List site users with id, name, email (if visible), and roles."""
+    _apply_site(site)
     users = _v2("GET", "/users", params={"per_page": min(per_page, 100), "context": "edit"})
     return json.dumps([{"id": u.get("id"), "name": u.get("name"),
                         "email": u.get("email"), "roles": u.get("roles"),
@@ -832,27 +1006,33 @@ def list_users(per_page: int = 50) -> str:
 
 
 @mcp.tool()
-def create_user(username: str, email: str, password: str, role: str = "author") -> str:
+def create_user(username: str, email: str, password: str, role: str = "author", site: str = "") -> str:
     """Create a new WordPress user. role is one of: subscriber, contributor, author,
     editor, administrator. Returns the new user id."""
+    _require_tier('paid')
+    _apply_site(site)
     u = _v2("POST", "/users", payload={"username": username, "email": email,
                                        "password": password, "roles": [role]})
     return json.dumps({"id": u.get("id"), "name": u.get("name"), "roles": u.get("roles")})
 
 
 @mcp.tool()
-def change_user_role(user_id: int, role: str) -> str:
+def change_user_role(user_id: int, role: str, site: str = "") -> str:
     """Change a user's role (subscriber/contributor/author/editor/administrator)."""
+    _require_tier('paid')
+    _apply_site(site)
     u = _v2("POST", f"/users/{user_id}", payload={"roles": [role]})
     return json.dumps({"id": u.get("id"), "roles": u.get("roles")})
 
 
 @mcp.tool()
-def bulk_generate_meta(limit: int = 30, apply: bool = False) -> str:
+def bulk_generate_meta(limit: int = 30, apply: bool = False, site: str = "") -> str:
     """For posts MISSING an SEO meta description, generate one from the post's
     content (first solid sentences, ~155 chars). apply=False previews; apply=True
     saves via the SEO backend. Pairs well with the SEO plugin. Uses update_post_seo
     under the hood when applying."""
+    _require_tier('paid')
+    _apply_site(site)
     posts = list(_all_posts(status="publish", limit=limit))
     out = []
     for p in posts:
@@ -881,10 +1061,12 @@ def bulk_generate_meta(limit: int = 30, apply: bool = False) -> str:
 
 
 @mcp.tool()
-def update_permalinks(structure: str) -> str:
+def update_permalinks(structure: str, site: str = "") -> str:
     """Set the permalink structure (e.g. '/%postname%/', '/%year%/%monthnum%/%postname%/').
     Then flushes rewrite rules. Changing this can affect existing URLs - warn the
     user. Requires wptaskify Studio (uses option write + flush)."""
+    _require_tier('paid')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -894,10 +1076,12 @@ def update_permalinks(structure: str) -> str:
 
 
 @mcp.tool()
-def bulk_update_category(from_category_id: int, to_category_id: int) -> str:
+def bulk_update_category(from_category_id: int, to_category_id: int, site: str = "") -> str:
     """Move ALL posts from one category to another (merge/cleanup). Every post in
     `from_category_id` gets `to_category_id` added and the old one removed. Returns
     how many posts were moved."""
+    _require_tier('paid')
+    _apply_site(site)
     moved = []
     page = 1
     while True:
@@ -920,10 +1104,13 @@ def bulk_update_category(from_category_id: int, to_category_id: int) -> str:
 
 @mcp.tool()
 def find_and_replace_meta(field: str, find: str, replace: str, limit: int = 300,
-                          apply: bool = False) -> str:
+                          apply: bool = False, site: str = "") -> str:
     """Find & replace text across an SEO meta field on many posts. `field` is one of:
     meta_title, meta_description, focus_keyword. apply=False previews matches;
     apply=True writes the changes. Great for bulk rebrands/typos in SEO fields."""
+    if apply:
+        _require_tier('paid')  # preview is free; the bulk WRITE is a paid action
+    _apply_site(site)
     if field not in ("meta_title", "meta_description", "focus_keyword"):
         return json.dumps({"error": "field must be meta_title, meta_description, or focus_keyword"})
     out = []
@@ -943,10 +1130,12 @@ def find_and_replace_meta(field: str, find: str, replace: str, limit: int = 300,
 
 
 @mcp.tool()
-def delete_unused_media(limit: int = 200, apply: bool = False) -> str:
+def delete_unused_media(limit: int = 200, apply: bool = False, site: str = "") -> str:
     """Find media (images) NOT used as any post's featured image and NOT referenced
     in any post body. apply=False previews; apply=True deletes them (frees space).
     Be careful - deletion is permanent. Scans up to `limit` media items."""
+    _require_tier('pro')
+    _apply_site(site)
     media = _v2("GET", "/media", params={"per_page": min(limit, 100), "context": "edit", "media_type": "image"})
     # Gather all image URLs + featured ids used across posts.
     used_urls, used_ids = set(), set()
@@ -978,12 +1167,14 @@ def delete_unused_media(limit: int = 200, apply: bool = False) -> str:
 
 
 @mcp.tool()
-def generate_sitemap() -> str:
+def generate_sitemap(site: str = "") -> str:
     """Return the site's XML sitemap URL (wptaskify serves one automatically).
     NOTE: Google (June 2023) and Bing both RETIRED the old sitemap-ping URLs, so
     there is no reliable ping endpoint anymore - reliable resubmission is done via
     Google Search Console (Site Kit). This confirms the sitemap and, if the old
     ping endpoints happen to still respond, reports that too."""
+    _require_tier('paid')
+    _apply_site(site)
     site = _cfg()["site_url"].rstrip("/")
     sitemap_url = site + "/wppseo-sitemap.xml"
     # Confirm the sitemap itself is actually reachable (this is the useful check).
@@ -1013,9 +1204,10 @@ def generate_sitemap() -> str:
 # REVISIONS / UNDO
 # ===========================================================================
 @mcp.tool()
-def list_revisions(post_id: int) -> str:
+def list_revisions(post_id: int, site: str = "") -> str:
     """List a post's saved revisions (id, date, snippet). Use restore_revision to
     roll back if an edit went wrong."""
+    _apply_site(site)
     revs = _v2("GET", f"/posts/{post_id}/revisions", params={"per_page": 20})
     return json.dumps([{"revision_id": r["id"], "date": r.get("date"),
                         "title": (r.get("title") or {}).get("rendered", ""),
@@ -1024,9 +1216,11 @@ def list_revisions(post_id: int) -> str:
 
 
 @mcp.tool()
-def restore_revision(post_id: int, revision_id: int) -> str:
+def restore_revision(post_id: int, revision_id: int, site: str = "") -> str:
     """Roll a post back to a previous revision (undo). Fetches that revision's
     content/title and writes it back onto the live post."""
+    _require_tier('paid')
+    _apply_site(site)
     rev = _v2("GET", f"/posts/{post_id}/revisions/{revision_id}", params={"context": "edit"})
     payload = {
         "title": (rev.get("title") or {}).get("raw", ""),
@@ -1040,9 +1234,10 @@ def restore_revision(post_id: int, revision_id: int) -> str:
 # SEARCH
 # ===========================================================================
 @mcp.tool()
-def search_site(query: str, per_page: int = 15) -> str:
+def search_site(query: str, per_page: int = 15, site: str = "") -> str:
     """Search across all posts & pages by keyword. Returns id, title, url, type.
     Great for finding internal-linking targets before editing an article."""
+    _apply_site(site)
     results = _v2("GET", "/search", params={"search": query, "per_page": min(per_page, 30)})
     return json.dumps([{"id": r.get("id"), "title": r.get("title"),
                         "url": r.get("url"), "type": r.get("subtype") or r.get("type")} for r in results],
@@ -1053,16 +1248,18 @@ def search_site(query: str, per_page: int = 15) -> str:
 # NAVIGATION MENUS
 # ===========================================================================
 @mcp.tool()
-def list_menus() -> str:
+def list_menus(site: str = "") -> str:
     """List navigation menus (id, name) and their locations."""
+    _apply_site(site)
     menus = _v2("GET", "/menus", params={"per_page": 50, "context": "edit"})
     return json.dumps([{"id": m["id"], "name": m.get("name"), "slug": m.get("slug"),
                         "locations": m.get("locations")} for m in menus], indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
-def list_menu_items(menu_id: int) -> str:
+def list_menu_items(menu_id: int, site: str = "") -> str:
     """List items in a menu (id, title, url, order, parent). Use to see/plan menu edits."""
+    _apply_site(site)
     items = _v2("GET", "/menu-items", params={"menus": menu_id, "per_page": 100, "context": "edit"})
     return json.dumps([{"id": i["id"], "title": (i.get("title") or {}).get("rendered", ""),
                         "url": i.get("url"), "order": i.get("menu_order"), "parent": i.get("parent")}
@@ -1070,8 +1267,10 @@ def list_menu_items(menu_id: int) -> str:
 
 
 @mcp.tool()
-def add_menu_item(menu_id: int, title: str, url: str, parent_id: int = 0) -> str:
+def add_menu_item(menu_id: int, title: str, url: str, parent_id: int = 0, site: str = "") -> str:
     """Add a custom link item to a navigation menu. Returns the new item id."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {"menus": menu_id, "title": title, "url": url, "type": "custom", "status": "publish"}
     if parent_id:
         payload["parent"] = parent_id
@@ -1080,8 +1279,10 @@ def add_menu_item(menu_id: int, title: str, url: str, parent_id: int = 0) -> str
 
 
 @mcp.tool()
-def delete_menu_item(item_id: int) -> str:
+def delete_menu_item(item_id: int, site: str = "") -> str:
     """Remove an item from a navigation menu."""
+    _require_tier('paid')
+    _apply_site(site)
     _v2("DELETE", f"/menu-items/{item_id}", params={"force": "true"})
     return json.dumps({"id": item_id, "result": "removed"})
 
@@ -1090,15 +1291,18 @@ def delete_menu_item(item_id: int) -> str:
 # SITE SETTINGS
 # ===========================================================================
 @mcp.tool()
-def get_settings() -> str:
+def get_settings(site: str = "") -> str:
     """Get site settings: title, tagline (description), timezone, date format, etc."""
+    _apply_site(site)
     s = _v2("GET", "/settings")
     return json.dumps(s, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
-def update_settings(title: str = "", tagline: str = "", timezone: str = "") -> str:
+def update_settings(title: str = "", tagline: str = "", timezone: str = "", site: str = "") -> str:
     """Update site settings. Only non-empty fields change. tagline = site description."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {}
     if title:
         payload["title"] = title
@@ -1139,10 +1343,11 @@ def _all_posts(status="publish,draft", limit=300):
 
 
 @mcp.tool()
-def check_broken_links(post_id: int = 0, limit: int = 50) -> str:
+def check_broken_links(post_id: int = 0, limit: int = 50, site: str = "") -> str:
     """Check links inside a post (or scan many posts if post_id=0) and report any
     that return 404 / errors. Checks both internal and external links. For a full
     scan, raise `limit` carefully (each link is fetched). Returns broken links per post."""
+    _apply_site(site)
     posts = [_v2("GET", f"/posts/{post_id}", params={"context": "edit"})] if post_id else list(_all_posts(limit=limit))
     report = []
     checked_cache = {}
@@ -1213,12 +1418,13 @@ def check_broken_links(post_id: int = 0, limit: int = 50) -> str:
 
 
 @mcp.tool()
-def suggest_internal_links(topic: str, exclude_post_id: int = 0, max_suggestions: int = 8) -> str:
+def suggest_internal_links(topic: str, exclude_post_id: int = 0, max_suggestions: int = 8, site: str = "") -> str:
     """Given a topic/keyword (or a draft article's subject), find the most relevant
     EXISTING posts to link to internally. Returns title + url + why (which topic
     words matched). Results are RANKED by how many topic keywords each title
     shares, so the most on-topic targets come first. Use this before
     writing/editing so you can insert internal links to these targets."""
+    _apply_site(site)
     stop = {"the", "a", "an", "is", "are", "of", "for", "to", "and", "your", "you",
             "in", "on", "with", "best", "vs", "what", "how", "much", "it", "or",
             "at", "by", "from", "into", "review", "guide", "top", "systems", "system"}
@@ -1324,7 +1530,7 @@ def _keyword_phrases(title: str, min_words: int = 2, max_words: int = 4):
 @mcp.tool()
 def bulk_internal_links(max_per_post: int = 3, min_title_words: int = 2,
                         limit: int = 300, dry_run: bool = False,
-                        match_keywords: bool = True) -> str:
+                        match_keywords: bool = True, site: str = "") -> str:
     """BULK internal linking across the WHOLE site in ONE call - no need to go
     post-by-post. For every published post it finds natural anchor phrases that
     point to OTHER posts and turns the first mention of each into an internal link.
@@ -1347,6 +1553,8 @@ def bulk_internal_links(max_per_post: int = 3, min_title_words: int = 2,
     Set `dry_run=True` to PREVIEW what would be linked without saving. Returns a
     per-post summary of links added (anchor text + target). Run once and it links
     the whole site; re-running only adds genuinely new links."""
+    _require_tier('paid')
+    _apply_site(site)
     # 1. Build targets: each = (id, title, url, [anchor phrases], {topic words}).
     posts = list(_all_posts(status="publish", limit=limit))
     targets = []
@@ -1563,7 +1771,7 @@ def _build_link_plan(max_per_post=3, min_title_words=2, limit=300, match_keyword
 
 @mcp.tool()
 def plan_internal_links(max_per_post: int = 3, min_title_words: int = 2,
-                        limit: int = 300) -> str:
+                        limit: int = 300, site: str = "") -> str:
     """STEP 1 of bulk internal linking: scan the WHOLE site ONCE and produce a
     COMPLETE plan of every internal link to add - WITHOUT changing anything.
 
@@ -1574,6 +1782,7 @@ def plan_internal_links(max_per_post: int = 3, min_title_words: int = 2,
 
     Returns: {total_posts, total_links, plan: [{post_id, post_title, links:[...]}]}.
     Pass the ENTIRE `plan` array back to apply_internal_links_plan."""
+    _apply_site(site)
     plan = _build_link_plan(max_per_post, min_title_words, limit)
     return json.dumps({
         "total_posts": len(plan),
@@ -1586,7 +1795,7 @@ def plan_internal_links(max_per_post: int = 3, min_title_words: int = 2,
 
 @mcp.tool()
 def apply_internal_links_plan(plan_json: str, batch_size: int = 25,
-                              start_index: int = 0) -> str:
+                              start_index: int = 0, site: str = "") -> str:
     """STEP 2 of bulk internal linking: EXECUTE a plan from `plan_internal_links`,
     one BATCH at a time - no re-scanning, no per-post confirmation.
 
@@ -1600,6 +1809,8 @@ def apply_internal_links_plan(plan_json: str, batch_size: int = 25,
     (so it stays correct) and linked; JSON-LD schema is preserved. Returns
     {updated, links_added, next_index, done} - keep calling with next_index until
     done=true to finish the whole site without stopping."""
+    _require_tier('paid')
+    _apply_site(site)
     try:
         data = json.loads(plan_json)
     except Exception:
@@ -1674,10 +1885,11 @@ def apply_internal_links_plan(plan_json: str, batch_size: int = 25,
 
 
 @mcp.tool()
-def find_thin_content(min_words: int = 600, limit: int = 300) -> str:
+def find_thin_content(min_words: int = 600, limit: int = 300, site: str = "") -> str:
     """Scan posts and flag THIN content (fewer than `min_words` words of visible
     text, schema/HTML stripped). Thin pages hurt SEO. Returns id, title, word_count,
     url sorted shortest first."""
+    _apply_site(site)
     flagged = []
     for p in _all_posts(status="publish", limit=limit):
         raw = (p.get("content") or {}).get("raw", "")
@@ -1694,9 +1906,10 @@ def find_thin_content(min_words: int = 600, limit: int = 300) -> str:
 
 
 @mcp.tool()
-def find_duplicate_titles(limit: int = 300) -> str:
+def find_duplicate_titles(limit: int = 300, site: str = "") -> str:
     """Find posts with identical or near-identical titles (possible duplicate/competing
     content). Returns groups of posts sharing a title."""
+    _apply_site(site)
     seen = {}
     for p in _all_posts(limit=limit):
         title = (p.get("title") or {}).get("raw", "").strip().lower()
@@ -1706,10 +1919,12 @@ def find_duplicate_titles(limit: int = 300) -> str:
 
 
 @mcp.tool()
-def fix_missing_alt_text(limit: int = 100, apply: bool = False) -> str:
+def fix_missing_alt_text(limit: int = 100, apply: bool = False, site: str = "") -> str:
     """Find media items with empty alt text. With apply=False (default) just reports
     them. With apply=True, sets alt text from each image's title (cleaned). Good for
     accessibility + image SEO."""
+    _require_tier('paid')
+    _apply_site(site)
     items = _v2("GET", "/media", params={"per_page": min(limit, 100), "context": "edit", "media_type": "image"})
     fixed, missing = [], []
     for m in items:
@@ -1765,11 +1980,13 @@ def _gemini_describe_image(image_url: str) -> str:
 
 
 @mcp.tool()
-def generate_alt_text_ai(limit: int = 30, apply: bool = False) -> str:
+def generate_alt_text_ai(limit: int = 30, apply: bool = False, site: str = "") -> str:
     """AI alt-text generator: for images with EMPTY alt text, use Gemini vision to
     look at each image and write a proper descriptive alt text (better than the
     title-based fix_missing_alt_text). apply=False previews; apply=True saves them.
     Needs a Gemini key. Good for accessibility + image SEO."""
+    _require_tier('paid')
+    _apply_site(site)
     items = _v2("GET", "/media", params={"per_page": min(limit, 50), "context": "edit", "media_type": "image"})
     out = []
     for m in items:
@@ -1791,11 +2008,12 @@ def generate_alt_text_ai(limit: int = 30, apply: bool = False) -> str:
 
 
 @mcp.tool()
-def validate_schema(post_id: int = 0, limit: int = 100) -> str:
+def validate_schema(post_id: int = 0, limit: int = 100, site: str = "") -> str:
     """Validate the JSON-LD structured data (schema) in a post - or scan many posts
     if post_id=0. Checks each <script type="application/ld+json"> block parses as
     valid JSON and has @context and @type. Reports posts with missing or broken
     schema. Good for rich-results health."""
+    _apply_site(site)
     posts = [_v2("GET", f"/posts/{post_id}", params={"context": "edit"})] if post_id else list(_all_posts(limit=limit))
     report = []
     for p in posts:
@@ -1845,11 +2063,12 @@ def validate_schema(post_id: int = 0, limit: int = 100) -> str:
 
 
 @mcp.tool()
-def find_orphan_pages(limit: int = 300) -> str:
+def find_orphan_pages(limit: int = 300, site: str = "") -> str:
     """Find ORPHAN content: published posts/pages that NO other post links to
     internally. Orphans are hard for users and search engines to discover. Returns
     the orphaned items so you can add internal links to them (e.g. with
     bulk_internal_links). Scans up to `limit` posts."""
+    _apply_site(site)
     posts = list(_all_posts(status="publish", limit=limit))
     site = _cfg()["site_url"].rstrip("/")
     linked = set()
@@ -2024,7 +2243,7 @@ def _geo_score(sig):
 
 
 @mcp.tool()
-def geo_audit_post(post_id: int, target_queries: str = "") -> str:
+def geo_audit_post(post_id: int, target_queries: str = "", site: str = "") -> str:
     """GEO / AEO audit - how CITATION-READY a post is for AI answer engines
     (ChatGPT, Perplexity, Google AI Overviews, Gemini, Claude). Scores 8 dimensions
     0-100 (clear definitions, quotable statements, factual density, source
@@ -2034,6 +2253,7 @@ def geo_audit_post(post_id: int, target_queries: str = "") -> str:
     25-50 word answer a machine could quote? Returns measured scores + specific,
     actionable fixes. All numbers here are MEASURED from the content (not guessed);
     anything inferred is labeled."""
+    _apply_site(site)
     p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     title = (p.get("title") or {}).get("rendered", "")
@@ -2125,7 +2345,7 @@ def geo_audit_post(post_id: int, target_queries: str = "") -> str:
 
 
 @mcp.tool()
-def geo_optimize_post(post_id: int, optimized_html: str = "", target_queries: str = "") -> str:
+def geo_optimize_post(post_id: int, optimized_html: str = "", target_queries: str = "", site: str = "") -> str:
     """Make a post AI-CITATION-READY. Two ways to use it:
 
     1) PLAN MODE (optimized_html empty): returns the post's current body + a GEO
@@ -2139,6 +2359,8 @@ def geo_optimize_post(post_id: int, optimized_html: str = "", target_queries: st
     dated facts, Q&A headings + lists/tables, an FAQ that matches the visible
     content, author/E-E-A-T markers, and a visible date. Keep it accurate - never
     invent facts or fake sources."""
+    _require_tier('paid')
+    _apply_site(site)
     p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     title = (p.get("title") or {}).get("rendered", "")
@@ -2189,7 +2411,7 @@ def geo_optimize_post(post_id: int, optimized_html: str = "", target_queries: st
 
 
 @mcp.tool()
-def ai_seo_score(limit: int = 50) -> str:
+def ai_seo_score(limit: int = 50, site: str = "") -> str:
     """The AI SEO Score - a unified, AI-era SEO scorecard for the whole site across
     5 categories (each 0-100) plus an overall: On-Page, Technical, AEO (answer-
     engine readiness), GEO (AI-citation readiness), and Authority (E-E-A-T). Every
@@ -2197,6 +2419,7 @@ def ai_seo_score(limit: int = 50) -> str:
     returns concrete issue COUNTS (missing meta, missing alt, no schema, orphan
     pages, thin content, broken structure) so the dashboard can show 'Fix with
     Claude' actions. This is what powers the dashboard's AI SEO widget."""
+    _apply_site(site)
     posts = list(_all_posts(status="publish", limit=limit))
     n = max(1, len(posts))
     site = _cfg()["site_url"].rstrip("/")
@@ -2314,7 +2537,7 @@ def ai_seo_score(limit: int = 50) -> str:
 
 
 @mcp.tool()
-def request_approval(action_summary: str, tool_name: str = "", risk: str = "high") -> str:
+def request_approval(action_summary: str, tool_name: str = "", risk: str = "high", site: str = "") -> str:
     """Queue a RISKY action for the site owner to approve in their wptaskify
     dashboard, instead of doing it right away. Use this for irreversible or high-
     impact actions when the user hasn't already explicitly approved them - e.g.
@@ -2325,6 +2548,7 @@ def request_approval(action_summary: str, tool_name: str = "", risk: str = "high
     to do (the user sees this). `risk`: 'low' | 'medium' | 'high'. After calling
     this, TELL the user it's waiting for their approval in the dashboard's Approval
     inbox, and do NOT perform the action until they approve it there."""
+    _apply_site(site)
     cfg = _cfg()
     hook = cfg.get("approval_hook")
     if hook is None:
@@ -2342,10 +2566,11 @@ def request_approval(action_summary: str, tool_name: str = "", risk: str = "high
 
 
 @mcp.tool()
-def check_approval(approval_id: str) -> str:
+def check_approval(approval_id: str, site: str = "") -> str:
     """Check whether a queued approval (from request_approval) has been decided by
     the user. Returns status: 'pending', 'approved', or 'rejected'. Only perform the
     action once status is 'approved'; if 'rejected', do not do it."""
+    _apply_site(site)
     cfg = _cfg()
     checker = cfg.get("approval_status_hook")
     if checker is None:
@@ -2355,10 +2580,12 @@ def check_approval(approval_id: str) -> str:
 
 
 @mcp.tool()
-def insert_in_article_image(post_id: int, prompt: str, after_text: str = "", alt_text: str = "") -> str:
+def insert_in_article_image(post_id: int, prompt: str, after_text: str = "", alt_text: str = "", site: str = "") -> str:
     """Generate an image with Gemini and INSERT it inside a post's body as an <img>.
     If `after_text` is given, the image is placed right after the first occurrence of
     that text; otherwise appended before the schema block. Preserves schema."""
+    _require_tier('paid')
+    _apply_site(site)
     p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     img_bytes = _gemini_generate_image(prompt)
@@ -2385,10 +2612,12 @@ def insert_in_article_image(post_id: int, prompt: str, after_text: str = "", alt
 
 
 @mcp.tool()
-def fix_missing_excerpts(limit: int = 100, apply: bool = False) -> str:
+def fix_missing_excerpts(limit: int = 100, apply: bool = False, site: str = "") -> str:
     """Find published posts with an EMPTY excerpt. With apply=False reports them.
     With apply=True, generates a ~30-word excerpt from the first paragraph of each
     (your theme uses excerpt for meta description)."""
+    _require_tier('paid')
+    _apply_site(site)
     flagged = []
     for p in _all_posts(status="publish", limit=limit):
         ex = (p.get("excerpt") or {}).get("raw", "").strip()
@@ -2408,12 +2637,14 @@ def fix_missing_excerpts(limit: int = 100, apply: bool = False) -> str:
 
 
 @mcp.tool()
-def ping_search_engines(post_url: str = "") -> str:
+def ping_search_engines(post_url: str = "", site: str = "") -> str:
     """Ask search engines to re-crawl. IMPORTANT: Google and Bing RETIRED their
     sitemap-ping endpoints in 2023, so there is no working "ping" anymore. The
     reliable way to get new content crawled is Google Search Console (Site Kit) -
     submit your sitemap once and use "Request indexing" for a specific URL. This
     tool now returns those instructions instead of hitting dead endpoints."""
+    _require_tier('paid')
+    _apply_site(site)
     sitemap = _cfg()["site_url"].rstrip("/") + "/wppseo-sitemap.xml"
     steps = [
         "Sitemap: in Search Console (Site Kit) > Sitemaps, submit "
@@ -2437,11 +2668,12 @@ _H_RE = _re.compile(r'<h([1-6])\b[^>]*>(.*?)</h\1>', _re.IGNORECASE | _re.DOTALL
 
 
 @mcp.tool()
-def seo_audit_post(post_id: int, focus_keyword: str = "") -> str:
+def seo_audit_post(post_id: int, focus_keyword: str = "", site: str = "") -> str:
     """Full on-page SEO audit of ONE post in a single report: title length,
     excerpt/meta length, word count, heading structure (H1-H6), internal vs
     external link counts, images & missing alt, schema present?, and (if given)
     focus_keyword usage in title/first paragraph/density. Returns issues + stats."""
+    _apply_site(site)
     p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     title = (p.get("title") or {}).get("raw", "")
     excerpt = (p.get("excerpt") or {}).get("raw", "")
@@ -2523,9 +2755,11 @@ def seo_audit_post(post_id: int, focus_keyword: str = "") -> str:
 # REDIRECTS (Redirection plugin) - fix 404s
 # ===========================================================================
 @mcp.tool()
-def create_redirect(source_url: str, target_url: str, http_code: int = 301) -> str:
+def create_redirect(source_url: str, target_url: str, http_code: int = 301, site: str = "") -> str:
     """Create a redirect (e.g. fix a 404). source_url = old path like
     '/old-page/'; target_url = new path or full URL. 301 = permanent (default)."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {
         "url": source_url,
         "action_data": {"url": target_url},
@@ -2541,9 +2775,47 @@ def create_redirect(source_url: str, target_url: str, http_code: int = 301) -> s
 
 
 @mcp.tool()
-def list_404_log(per_page: int = 25) -> str:
+def list_redirects(search: str = "", per_page: int = 50, site: str = "") -> str:
+    """List existing redirects (Redirection plugin) with their ID, source URL,
+    target, and hit count. Use `search` to filter by URL. Get the ID here, then
+    delete_redirect to remove a duplicate/unwanted one."""
+    _apply_site(site)
+    params = {"per_page": min(per_page, 100), "orderby": "id", "direction": "asc"}
+    if search:
+        params["filterBy[url]"] = search
+    r = _request("GET", "/redirection/v1/redirect", params=params)
+    items = r.get("items", []) if isinstance(r, dict) else []
+    out = [{"id": i.get("id"), "source": i.get("url"),
+            "target": (i.get("action_data") or {}).get("url") if isinstance(i.get("action_data"), dict)
+                      else i.get("action_data"),
+            "code": i.get("action_code"), "hits": i.get("hits"),
+            "status": i.get("status")} for i in items]
+    return json.dumps({"count": len(out), "redirects": out}, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_redirect(redirect_id: int, site: str = "") -> str:
+    """Delete a redirect by its ID (find it with list_redirects). Removes it from
+    the Redirection plugin permanently. Use for duplicate/stale redirects."""
+    _require_tier('paid')
+    _apply_site(site)
+    # The Redirection plugin deletes via a bulk POST action (its REST DELETE isn't
+    # exposed on all versions); this bulk form is the reliable path.
+    try:
+        r = _request("POST", "/redirection/v1/bulk/redirect/delete",
+                     params={"items": str(int(redirect_id))})
+    except Exception:
+        # Fallback: some versions accept a plain DELETE on the item.
+        r = _request("DELETE", f"/redirection/v1/redirect/{int(redirect_id)}")
+    return json.dumps({"deleted_id": redirect_id,
+                       "raw": r if isinstance(r, dict) else str(r)[:200]}, ensure_ascii=False)
+
+
+@mcp.tool()
+def list_404_log(per_page: int = 25, site: str = "") -> str:
     """List recent 404 errors visitors hit (from Redirection plugin's 404 log).
     Great for finding broken URLs to redirect. Returns url + hit count."""
+    _apply_site(site)
     r = _request("GET", "/redirection/v1/404", params={"per_page": min(per_page, 50), "orderby": "count", "direction": "desc"})
     items = r.get("items", []) if isinstance(r, dict) else []
     return json.dumps([{"url": i.get("url"), "hits": i.get("count"), "last": i.get("last_access")} for i in items],
@@ -2557,12 +2829,14 @@ def list_404_log(per_page: int = 25) -> str:
 def publish_full_article(title: str, content_html: str, status: str = "draft",
                          author_id: int = 0, category_ids: str = "", tag_ids: str = "",
                          excerpt: str = "", internal_link_topic: str = "",
-                         generate_image: bool = True) -> str:
+                         generate_image: bool = True, site: str = "") -> str:
     """One-shot publisher: creates a post AND (optionally) sets author, categories,
     tags, excerpt, generates+attaches a Gemini featured image, and returns suggested
     internal links for the topic so you can weave them in. `content_html` should be
     the full article HTML (include your schema script if you have one).
     Use status='draft' to review first, 'publish' to go live."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {"title": title, "content": content_html, "status": status}
     if excerpt:
         payload["excerpt"] = excerpt
@@ -2601,9 +2875,10 @@ def publish_full_article(title: str, content_html: str, status: str = "draft",
 
 
 @mcp.tool()
-def find_related_posts(post_id: int, max_results: int = 6) -> str:
+def find_related_posts(post_id: int, max_results: int = 6, site: str = "") -> str:
     """Find posts most related to a given post (by shared title keywords). Useful
     for adding 'Related articles' internal links. Returns title + url."""
+    _apply_site(site)
     p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
     title = (p.get("title") or {}).get("raw", "")
     stop = {"the", "a", "an", "is", "are", "of", "for", "to", "and", "your", "you",
@@ -2761,11 +3036,12 @@ def _seo_write(post_id, values):
 
 
 @mcp.tool()
-def get_post_seo(post_id: int) -> str:
+def get_post_seo(post_id: int, site: str = "") -> str:
     """Read a post's SEO meta fields (meta title, description, focus keyword,
     keywords). Works on ANY site - auto-detects wptaskify, Yoast, Rank Math,
     or the wg-seo bridge. Returns current values + length hints (+ score if the
     wptaskify plugin is installed)."""
+    _apply_site(site)
     data = _seo_read(post_id)
     data["_lengths"] = {
         "meta_title_chars": len(data.get("meta_title", "") or ""),
@@ -2783,11 +3059,13 @@ def get_post_seo(post_id: int) -> str:
 
 @mcp.tool()
 def update_post_seo(post_id: int, meta_title: str = "", meta_description: str = "",
-                    focus_keyword: str = "", keywords: str = "") -> str:
+                    focus_keyword: str = "", keywords: str = "", site: str = "") -> str:
     """Set a post's SEO meta fields. Only non-empty values are written. Works on
     ANY site - auto-detects wptaskify, Yoast, Rank Math, or the wg-seo bridge,
     and writes to the right fields so the rendered <title>, meta description,
     Open Graph & Twitter tags update. `keywords` = comma-separated secondary keywords."""
+    _require_tier('paid')
+    _apply_site(site)
     values = {
         "meta_title": meta_title,
         "meta_description": meta_description,
@@ -2806,7 +3084,7 @@ def update_post_seo(post_id: int, meta_title: str = "", meta_description: str = 
 @mcp.tool()
 def update_post_aeo(post_id: int, quick_answer: str = "", key_takeaways: str = "",
                     reviewed_by: str = "", last_reviewed: str = "",
-                    speakable: str = "", in_language: str = "") -> str:
+                    speakable: str = "", in_language: str = "", site: str = "") -> str:
     """Set a post's ANSWER-ENGINE (AEO/GEO) fields - the stuff that gets a page
     quoted and cited by ChatGPT, Perplexity, Google AI Overviews, Gemini & Claude.
     WordPress and most SEO plugins have none of this. Only non-empty fields change.
@@ -2818,6 +3096,8 @@ def update_post_aeo(post_id: int, quick_answer: str = "", key_takeaways: str = "
       - last_reviewed: intentional review date YYYY-MM-DD (separate from auto-modified)
       - speakable: '1' to mark the title + quick answer as voice-readable (speakable schema)
       - in_language: BCP-47 code like 'en-US' (blank = site language)"""
+    _require_tier('paid')
+    _apply_site(site)
     fields = {}
     if quick_answer:
         fields["quick_answer"] = quick_answer
@@ -2839,10 +3119,11 @@ def update_post_aeo(post_id: int, quick_answer: str = "", key_takeaways: str = "
 
 
 @mcp.tool()
-def seo_backend_info() -> str:
+def seo_backend_info(site: str = "") -> str:
     """Detect which SEO system this site uses (wptaskify, Yoast, Rank Math,
     wg-seo bridge, or none). Tells you whether SEO meta tools will work here and
     suggests installing the free wptaskify plugin if nothing is detected."""
+    _apply_site(site)
     backend = _detect_seo_backend()
     names = {
         "wppilot": "wptaskify plugin",
@@ -2884,6 +3165,7 @@ def update_seo_settings(entity_type: str = "", entity_name: str = "",
       - logo_id / default_og_id: media library attachment IDs (upload first)
     This powers the site's Organization/Person schema + default OG image. Requires
     the wptaskify plugin (admin capability)."""
+    _require_tier('paid')
     payload = {}
     if entity_type:
         et = entity_type.strip().capitalize()
@@ -2921,6 +3203,7 @@ def update_analytics_settings(ga4_id: str = "", gsc_verify: str = "",
       - head_code: extra raw head tags (meta/script/link) for other verifications
         or pixels; sanitized to safe tags on save.
     Requires the wptaskify plugin (admin capability)."""
+    _require_tier('paid')
     payload = {}
     if ga4_id:
         payload["ga4_id"] = ga4_id
@@ -2937,20 +3220,23 @@ def update_analytics_settings(ga4_id: str = "", gsc_verify: str = "",
 
 
 @mcp.tool()
-def get_term_seo(term_id: int) -> str:
+def get_term_seo(term_id: int, site: str = "") -> str:
     """Read the SEO meta title + description for a TERM archive (category, tag, or
     custom taxonomy term). WordPress makes these archive pages but gives them no
     SEO meta - this does. Requires the wptaskify plugin. Use list_categories /
     list_tags to find term IDs."""
+    _apply_site(site)
     r = _request("GET", "/wppseo/v1/term-seo", params={"term": term_id})
     return json.dumps(r, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
-def update_term_seo(term_id: int, title: str = "", description: str = "") -> str:
+def update_term_seo(term_id: int, title: str = "", description: str = "", site: str = "") -> str:
     """Set the SEO meta title and/or description for a TERM archive (category, tag,
     custom taxonomy term). Only non-empty fields change. Improves how the archive
     page ranks and appears in search. Requires the wptaskify plugin."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {"term": int(term_id)}
     if title:
         payload["title"] = title
@@ -2963,18 +3249,21 @@ def update_term_seo(term_id: int, title: str = "", description: str = "") -> str
 
 
 @mcp.tool()
-def get_author_seo(user_id: int) -> str:
+def get_author_seo(user_id: int, site: str = "") -> str:
     """Read the SEO meta title + description for an AUTHOR archive page. WordPress
     makes the author archive but gives it no SEO meta - this does. Requires the
     wptaskify plugin. Use list_authors / list_users to find user IDs."""
+    _apply_site(site)
     r = _request("GET", "/wppseo/v1/author-seo", params={"user": user_id})
     return json.dumps(r, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
-def update_author_seo(user_id: int, title: str = "", description: str = "") -> str:
+def update_author_seo(user_id: int, title: str = "", description: str = "", site: str = "") -> str:
     """Set the SEO meta title and/or description for an AUTHOR archive page. Only
     non-empty fields change. Requires the wptaskify plugin."""
+    _require_tier('paid')
+    _apply_site(site)
     payload = {"user": int(user_id)}
     if title:
         payload["title"] = title
@@ -2987,34 +3276,47 @@ def update_author_seo(user_id: int, title: str = "", description: str = "") -> s
 
 
 @mcp.tool()
-def get_any_post_meta(post_id: int, key: str) -> str:
+def get_any_post_meta(post_id: int, key: str, site: str = "") -> str:
     """Low-level: read ANY custom meta field on a post by exact key name. Use the
     diagnostic /wg-seo/v1/keys endpoint names. For advanced/edge cases."""
+    _apply_site(site)
     return json.dumps({"post_id": post_id, "key": key, "value": _seo_get(post_id, key)}, ensure_ascii=False)
 
 
 @mcp.tool()
-def set_any_post_meta(post_id: int, key: str, value: str) -> str:
+def set_any_post_meta(post_id: int, key: str, value: str, site: str = "") -> str:
     """Low-level: set ANY custom meta field on a post by exact key name. Use carefully."""
+    _require_tier('paid')
+    _apply_site(site)
     _seo_set(post_id, key, value)
     return json.dumps({"post_id": post_id, "key": key, "value": value[:120], "saved": True}, ensure_ascii=False)
 
 
 @mcp.tool()
-def verify_live_meta(post_id: int = 0, url: str = "") -> str:
+def verify_live_meta(post_id: int = 0, url: str = "", site: str = "") -> str:
     """Fetch the LIVE rendered page (cache-bypassed) and extract the ACTUAL meta tags
     Google sees: title, meta description, canonical, OG title/desc, Twitter, and which
     plugin/theme emitted them (looks for the <!-- cwg-seo --> marker). Use this to
     confirm an SEO edit really rendered. Pass post_id OR a full url."""
+    _apply_site(site)
     if not url:
         if not post_id:
             return "Pass post_id or url."
         p = _v2("GET", f"/posts/{post_id}")
         url = p.get("link")
-    # cache-bust query param + no-cache headers
-    bust = url + ("&" if "?" in url else "?") + "wgnocache=1"
+    # Cache-bust with a UNIQUE value each call - a static param (e.g. wgnocache=1)
+    # can itself be cached by LiteSpeed/CDN, returning a stale page. A random,
+    # never-before-seen query string forces a fresh render. Belt-and-suspenders
+    # with strong no-cache headers.
+    import time as _t, os as _os
+    nonce = str(int(_t.time() * 1000)) + _os.urandom(4).hex()
+    bust = url + ("&" if "?" in url else "?") + "wgnocache=" + nonce
     req = urllib.request.Request(bust, headers={
-        "User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache", "Pragma": "no-cache"})
+        "User-Agent": "Mozilla/5.0 (compatible; wptaskify-verify/1.0)",
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        "Pragma": "no-cache",
+        "X-LiteSpeed-Purge": "*",  # ask LiteSpeed to skip cache for this hit
+    })
     html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
     head = html[:html.find("</head>")] if "</head>" in html else html[:9000]
 
@@ -3037,15 +3339,16 @@ def verify_live_meta(post_id: int = 0, url: str = "") -> str:
 
 
 @mcp.tool()
-def scan_aioseo_leftovers() -> str:
+def scan_aioseo_leftovers(site: str = "") -> str:
     """Count leftover _aioseo_* meta data still stored in the database (from the old
     All in One SEO plugin). These can conflict with your theme's _cwg_seo_* fields."""
+    _apply_site(site)
     r = _request("GET", "/wg-seo/v1/aioseo-scan")
     return json.dumps(r, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
-def migrate_aioseo_meta(apply: bool = False) -> str:
+def migrate_aioseo_meta(apply: bool = False, site: str = "") -> str:
     """One-shot migration: copy old All-in-One-SEO (_aioseo_*) meta into your theme's
     SEO fields (_cwg_seo_*), for ALL posts + pages in a SINGLE server-side pass (no
     per-post loop). SAFE: only fills EMPTY target fields (never overwrites SEO you
@@ -3059,17 +3362,21 @@ def migrate_aioseo_meta(apply: bool = False) -> str:
     apply=True = actually writes. After applying, verify a few posts with
     verify_live_meta, THEN run clean_aioseo_leftovers to remove the old rows.
     Requires the WaterGuide SEO bridge (mu-plugin)."""
+    _require_tier('paid')
+    _apply_site(site)
     r = _request("POST", "/wg-seo/v1/migrate", payload={"apply": bool(apply)})
     return json.dumps(r, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
-def clean_aioseo_leftovers(confirm: bool = False) -> str:
+def clean_aioseo_leftovers(confirm: bool = False, site: str = "") -> str:
     """Delete ALL leftover _aioseo_* meta from every post (cleans old All in One SEO
     data so only your theme's _cwg_seo_* SEO fields remain). Pass confirm=True to run.
     This does NOT touch your _cwg_seo_* fields or post content. Run scan_aioseo_leftovers
     first to see what will be removed. IMPORTANT: if you still need the AIOSEO data,
     run migrate_aioseo_meta(apply=true) BEFORE this - cleaning is irreversible."""
+    _require_tier('paid')
+    _apply_site(site)
     if not confirm:
         r = _request("GET", "/wg-seo/v1/aioseo-scan")
         return json.dumps({"dry_run": True, "would_delete": r,
@@ -3079,9 +3386,10 @@ def clean_aioseo_leftovers(confirm: bool = False) -> str:
 
 
 @mcp.tool()
-def audit_seo_fields(limit: int = 100) -> str:
+def audit_seo_fields(limit: int = 100, site: str = "") -> str:
     """Scan published posts and report which are MISSING SEO meta title, description,
     or focus keyword (the _cwg_seo_* fields). Great for finding posts to optimize."""
+    _apply_site(site)
     problems = []
     for p in _all_posts(status="publish", limit=limit):
         pid = p["id"]
@@ -3106,8 +3414,9 @@ def audit_seo_fields(limit: int = 100) -> str:
 # SITE INFO
 # ===========================================================================
 @mcp.tool()
-def site_info() -> str:
+def site_info(site: str = "") -> str:
     """Get site overview: name, description, URL, post/page counts, and active plugins."""
+    _apply_site(site)
     root = _request("GET", "")
     counts = {}
     for t in ("posts", "pages"):
@@ -3154,10 +3463,11 @@ def _studio_guard():
 
 
 @mcp.tool()
-def studio_info() -> str:
+def studio_info(site: str = "") -> str:
     """Check whether wptaskify Studio (the build/file-editing companion plugin) is
     active, and what it can do. Use this before any CSS / file / theme / plugin
     build tool. Returns capabilities + allowed roots, or an install hint."""
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3165,7 +3475,7 @@ def studio_info() -> str:
 
 
 @mcp.tool()
-def set_custom_css(css: str) -> str:
+def set_custom_css(css: str, site: str = "") -> str:
     """Set the site-wide custom CSS (applies to the WHOLE site, every theme).
     This is the SAFEST way to restyle a site - colors, fonts, spacing, layout
     tweaks - because CSS can never crash PHP. REPLACES the current custom CSS;
@@ -3176,6 +3486,8 @@ def set_custom_css(css: str) -> str:
     16-18px, line-height ~1.6), comfortable buttons with hover states, soft
     shadows/rounded corners, and subtle 150-250ms transitions. Keep it clean,
     modern and consistent - avoid clutter, tiny text, and clashing colors."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3184,8 +3496,9 @@ def set_custom_css(css: str) -> str:
 
 
 @mcp.tool()
-def get_custom_css() -> str:
+def get_custom_css(site: str = "") -> str:
     """Get the current site-wide custom CSS set via wptaskify Studio."""
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3193,11 +3506,12 @@ def get_custom_css() -> str:
 
 
 @mcp.tool()
-def list_theme_plugin_files(path: str) -> str:
+def list_theme_plugin_files(path: str, site: str = "") -> str:
     """List files/folders inside a theme, plugin or the uploads dir. `path` must
     start with 'themes/', 'plugins/' or 'uploads/' (e.g. 'themes/blocksy' or
     'plugins/wp-pilot-seo'). Use this to explore before reading/editing files.
     Requires wptaskify Studio."""
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3206,10 +3520,11 @@ def list_theme_plugin_files(path: str) -> str:
 
 
 @mcp.tool()
-def read_theme_plugin_file(path: str) -> str:
+def read_theme_plugin_file(path: str, site: str = "") -> str:
     """Read a theme/plugin/uploads file's contents. `path` starts with 'themes/',
     'plugins/' or 'uploads/' (e.g. 'themes/blocksy/functions.php'). Requires
     wptaskify Studio. Read BEFORE editing so you preserve existing code."""
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3218,7 +3533,7 @@ def read_theme_plugin_file(path: str) -> str:
 
 
 @mcp.tool()
-def write_theme_plugin_file(path: str, contents: str) -> str:
+def write_theme_plugin_file(path: str, contents: str, site: str = "") -> str:
     """Write (create or overwrite) a theme/plugin/uploads file. `path` starts with
     'themes/', 'plugins/' or 'uploads/'. The Studio plugin AUTOMATICALLY backs up
     any existing file and, for .php files, PHP-lints `contents` first - if the PHP
@@ -3231,6 +3546,8 @@ def write_theme_plugin_file(path: str, contents: str) -> str:
     to change and the risk, and (3) get their explicit 'yes'. Creating a brand-new
     file, or editing CSS, is low-risk and doesn't need this ceremony. Always read
     the file first for edits. Requires wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3254,12 +3571,14 @@ def write_theme_plugin_file(path: str, contents: str) -> str:
 
 
 @mcp.tool()
-def create_plugin(slug: str, name: str = "", description: str = "", code: str = "") -> str:
+def create_plugin(slug: str, name: str = "", description: str = "", code: str = "", site: str = "") -> str:
     """Create a NEW WordPress plugin (folder + main file with a valid header).
     `slug` = folder/file name (lowercase-dashes). `code` = optional PHP body AFTER
     the header (do NOT include <?php or the header - those are added). Safe: a new
     plugin can't break existing code. Activate it separately if needed. Requires
     wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3271,7 +3590,7 @@ def create_plugin(slug: str, name: str = "", description: str = "", code: str = 
 
 @mcp.tool()
 def create_theme(slug: str, name: str = "", style_css: str = "",
-                 index_php: str = "", functions_php: str = "") -> str:
+                 index_php: str = "", functions_php: str = "", site: str = "") -> str:
     """Create a NEW WordPress theme (style.css + index.php + functions.php).
     `slug` = folder name. `style_css` = CSS (a Theme Name header is added if
     missing). `index_php`/`functions_php` = optional PHP (lint-checked). Safe:
@@ -3286,6 +3605,8 @@ def create_theme(slug: str, name: str = "", style_css: str = "",
     radius, comfortable buttons with hover states, SVG icons (not emoji), subtle
     150-250ms transitions, and FULLY responsive mobile-first layout. Pick one
     consistent style that fits the site's topic."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3296,12 +3617,14 @@ def create_theme(slug: str, name: str = "", style_css: str = "",
 
 
 @mcp.tool()
-def preview_theme(slug: str) -> str:
+def preview_theme(slug: str, site: str = "") -> str:
     """Get a SAFE PREVIEW link for a theme WITHOUT activating it - only the
     logged-in admin sees the preview; visitors keep seeing the current live theme.
     This is the 'staging' step: create_theme -> preview_theme -> (looks good?) ->
     activate_theme. ALWAYS preview a new theme and let the user confirm it looks
     right before activating. Requires wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3310,7 +3633,7 @@ def preview_theme(slug: str) -> str:
 
 
 @mcp.tool()
-def activate_theme(slug: str) -> str:
+def activate_theme(slug: str, site: str = "") -> str:
     """Activate a theme by its slug (folder name) - makes it LIVE for all visitors.
 
     STAGING FLOW - don't surprise the user: for a newly built theme, first call
@@ -3318,6 +3641,8 @@ def activate_theme(slug: str) -> str:
     their OK, THEN activate. The plugin remembers the previous theme, so if the new
     one looks wrong live you can call rollback_theme to restore it instantly.
     Requires wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3326,10 +3651,12 @@ def activate_theme(slug: str) -> str:
 
 
 @mcp.tool()
-def rollback_theme() -> str:
+def rollback_theme(site: str = "") -> str:
     """Instantly switch back to the theme that was active BEFORE the last
     activate_theme. Use if a newly activated theme looks broken or wrong on the
     live site. Requires wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3338,9 +3665,10 @@ def rollback_theme() -> str:
 
 
 @mcp.tool()
-def list_themes() -> str:
+def list_themes(site: str = "") -> str:
     """List all installed themes with name, version, and which one is ACTIVE. Use
     this before activating/previewing/editing a theme. Requires wptaskify Studio."""
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3348,9 +3676,10 @@ def list_themes() -> str:
 
 
 @mcp.tool()
-def list_plugins() -> str:
+def list_plugins(site: str = "") -> str:
     """List all installed plugins with name, version, file, and active/inactive
     state. Requires wptaskify Studio."""
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3358,9 +3687,11 @@ def list_plugins() -> str:
 
 
 @mcp.tool()
-def activate_plugin(plugin_file: str) -> str:
+def activate_plugin(plugin_file: str, site: str = "") -> str:
     """Activate an installed plugin by its file (e.g. 'akismet/akismet.php' - get
     it from list_plugins). Requires wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3370,10 +3701,12 @@ def activate_plugin(plugin_file: str) -> str:
 
 
 @mcp.tool()
-def deactivate_plugin(plugin_file: str) -> str:
+def deactivate_plugin(plugin_file: str, site: str = "") -> str:
     """Deactivate an active plugin by its file (from list_plugins). wptaskify cannot
     deactivate itself. This can change site behaviour - WARN the user and confirm
     first. Requires wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3383,12 +3716,14 @@ def deactivate_plugin(plugin_file: str) -> str:
 
 
 @mcp.tool()
-def full_site_backup(include_uploads: bool = False) -> str:
+def full_site_backup(include_uploads: bool = False, site: str = "") -> str:
     """Take a FULL backup of the site's code (all themes + plugins) plus a snapshot
     of the active theme/plugins - one zip you can restore from. Set include_uploads
     True to also back up the media library (can be large). Returns a backup_id to
     use with restore_site_backup. Do this BEFORE big/risky changes. Requires WP
     Pilot Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3397,10 +3732,12 @@ def full_site_backup(include_uploads: bool = False) -> str:
 
 
 @mcp.tool()
-def restore_site_backup(backup_id: str) -> str:
+def restore_site_backup(backup_id: str, site: str = "") -> str:
     """Restore a full-site backup by its backup_id (from full_site_backup). This
     overwrites theme/plugin files and restores the active theme/plugins. RISKY -
     WARN the user and confirm first. Requires wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3409,10 +3746,12 @@ def restore_site_backup(backup_id: str) -> str:
 
 
 @mcp.tool()
-def install_plugin_from_repo(slug: str, activate: bool = False) -> str:
+def install_plugin_from_repo(slug: str, activate: bool = False, site: str = "") -> str:
     """Install a plugin from the WordPress.org repository by its slug (e.g.
     'wordpress-seo', 'contact-form-7'). Set activate=True to also activate it.
     Requires wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3421,10 +3760,11 @@ def install_plugin_from_repo(slug: str, activate: bool = False) -> str:
 
 
 @mcp.tool()
-def check_site_health() -> str:
+def check_site_health(site: str = "") -> str:
     """Report site health: PHP & WP version, active theme, plugin counts, DB size,
     HTTPS, debug mode, memory limit. Good for a quick diagnostic. Requires wptaskify
     Studio."""
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3432,9 +3772,10 @@ def check_site_health() -> str:
 
 
 @mcp.tool()
-def get_wp_option(key: str) -> str:
+def get_wp_option(key: str, site: str = "") -> str:
     """Read ANY WordPress option/setting by key (e.g. 'blogname', 'posts_per_page',
     'timezone_string'). Requires wptaskify Studio."""
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3443,10 +3784,12 @@ def get_wp_option(key: str) -> str:
 
 
 @mcp.tool()
-def update_wp_option(key: str, value: str) -> str:
+def update_wp_option(key: str, value: str, site: str = "") -> str:
     """Write ANY WordPress option/setting by key. A few lock-out-risk options
     (siteurl, home, admin_email) are protected. Some changes affect the whole site
     - for risky ones, warn the user first. Requires wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3456,7 +3799,7 @@ def update_wp_option(key: str, value: str) -> str:
 
 @mcp.tool()
 def edit_robots_txt(contents: str = "", get_only: bool = False,
-                    delete_physical: bool = False) -> str:
+                    delete_physical: bool = False, site: str = "") -> str:
     """Get or set the site's robots.txt (served via WordPress). Pass get_only=True
     to just read it. Setting it controls what search engines can crawl - be careful
     not to block the whole site.
@@ -3466,6 +3809,8 @@ def edit_robots_txt(contents: str = "", get_only: bool = False,
     `physical_exists`; if true, tell the user, and pass delete_physical=True (when the
     file is writable) to remove it so your override takes effect. Requires wptaskify
     Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3479,11 +3824,13 @@ def edit_robots_txt(contents: str = "", get_only: bool = False,
 
 
 @mcp.tool()
-def edit_htaccess(contents: str = "", get_only: bool = False) -> str:
+def edit_htaccess(contents: str = "", get_only: bool = False, site: str = "") -> str:
     """Get or set the root .htaccess file. RISKY - a wrong rule can break the whole
     site (500 error). The plugin backs up the old file first. Always read it first
     (get_only=True), WARN the user, and confirm before writing. Requires wptaskify
     Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3494,9 +3841,10 @@ def edit_htaccess(contents: str = "", get_only: bool = False) -> str:
 
 
 @mcp.tool()
-def get_activity_log() -> str:
+def get_activity_log(site: str = "") -> str:
     """Get the recent wptaskify activity log (what the AI changed on this site).
     Requires wptaskify Studio."""
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3504,13 +3852,15 @@ def get_activity_log() -> str:
 
 
 @mcp.tool()
-def edit_llms_txt(contents: str = "", get_only: bool = False) -> str:
+def edit_llms_txt(contents: str = "", get_only: bool = False, site: str = "") -> str:
     """Get or set the site's /llms.txt - the AI-friendly index (like robots.txt but
     for LLMs / AI answer engines). It tells ChatGPT, Perplexity, Gemini etc. what
     the site is about and which pages matter, so they understand and CITE it better
     (GEO/AEO). get_only=True reads current state; passing `contents` sets a custom
     llms.txt (empty string = back to auto-generated from the site). Great to write
     a curated, well-described index of your best content. Requires wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3522,12 +3872,14 @@ def edit_llms_txt(contents: str = "", get_only: bool = False) -> str:
 
 @mcp.tool()
 def bulk_optimize_images(limit: int = 30, quality: int = 80,
-                         to_webp: bool = False, apply: bool = False) -> str:
+                         to_webp: bool = False, apply: bool = False, site: str = "") -> str:
     """Compress the media library's JPEG/PNG images (and optionally convert to
     WebP) to speed up the site. `quality` 40-95 (default 80). to_webp=True writes
     .webp copies. apply=False previews sizes; apply=True actually processes (backs
     up originals first when compressing in place). Returns bytes saved. Requires
     wptaskify Studio."""
+    _require_tier('pro')
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3537,9 +3889,10 @@ def bulk_optimize_images(limit: int = 30, quality: int = 80,
 
 
 @mcp.tool()
-def list_studio_backups() -> str:
+def list_studio_backups(site: str = "") -> str:
     """List the automatic file backups wptaskify Studio has made (before each edit).
     Useful to reassure the user their originals are saved. Requires wptaskify Studio."""
+    _apply_site(site)
     g = _studio_guard()
     if g:
         return g
@@ -3547,27 +3900,119 @@ def list_studio_backups() -> str:
 
 
 # ===========================================================================
+# MULTI-SITE - a user can connect several WordPress sites. By default the AI works
+# on the primary site; these tools let it see all sites and switch between them.
+# ===========================================================================
+@mcp.tool()
+def list_my_sites() -> str:
+    """List ALL WordPress sites connected to this account (URL + which one is
+    active right now). If you have more than one site, use `use_site` to choose
+    which one the tools act on before running commands on it. Also use this if a
+    tool says no site is connected - it confirms whether any site exists."""
+    import db as _db
+    # Read the uid even when no site is connected (no_site context), so we can tell
+    # the user "you have no sites, add one" instead of erroring.
+    _raw = _call_site_cfg.get() or current_tenant.get() or {}
+    uid = _raw.get("user_id")
+    if not uid:
+        return json.dumps({"error": "no user context"})
+    sites = _db.list_user_sites(uid)
+    active_sites = [s for s in sites if s.get("status", "active") == "active"]
+    if not active_sites:
+        return json.dumps({
+            "count": 0, "sites": [],
+            "message": "No WordPress site is connected to your wptaskify account yet. "
+                       "Add your site first: install the free wptaskify plugin on your "
+                       "WordPress site and click Connect (or add it from your wptaskify "
+                       "dashboard at https://wptaskify.com/dashboard). Then your tools "
+                       "will work."}, indent=2, ensure_ascii=False)
+    sites = _db.list_user_sites(uid)
+    active = _cfg().get("site_url", "").rstrip("/")
+    out = [{"id": s["id"], "site_url": s["site_url"],
+            "active": (s["site_url"] or "").rstrip("/") == active,
+            "primary": s.get("is_primary")}
+           for s in sites if s.get("status", "active") == "active"]
+    return json.dumps({"count": len(out), "active_site": active, "sites": out},
+                      indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def use_site(site: str) -> str:
+    """Switch which connected WordPress site the tools act on. `site` can be the
+    site's URL (e.g. 'https://completewaterguide.com' or just 'completewaterguide'),
+    or its id. All following tool calls in this conversation act on that site until
+    you switch again. Use list_my_sites first to see your options. Essential when
+    you have connected more than one site."""
+    import db as _db
+    import base64 as _b64
+    cfg = _cfg()
+    uid = cfg.get("user_id")
+    if not uid:
+        return json.dumps({"error": "no user context"})
+    match = _db.get_site_by_ref(uid, site)
+    if not match:
+        sites = [s["site_url"] for s in _db.list_user_sites(uid) if s.get("status", "active") == "active"]
+        return json.dumps({"error": f"no connected site matches '{site}'.",
+                           "your_sites": sites}, indent=2, ensure_ascii=False)
+    # 1) Persist the choice so it survives across MCP requests (each request re-
+    #    resolves the tenant from the DB, so an in-memory swap alone wouldn't stick).
+    try:
+        _db.set_active_site(uid, match["id"])
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({"error": f"could not save site choice: {str(e)[:80]}"})
+    # 2) Also swap the CURRENT request's creds in place so THIS turn's later tool
+    #    calls already hit the chosen site.
+    token = _b64.b64encode(
+        f"{match['wp_username']}:{match['app_password'].replace(' ', '')}".encode()).decode()
+    cfg["site_url"] = match["site_url"].rstrip("/")
+    cfg["base_headers"] = {"Authorization": "Basic " + token, "User-Agent": "wp-mcp/3.0"}
+    return json.dumps({"switched_to": cfg["site_url"], "site_id": match["id"],
+                       "note": "All tools now act on this site until you switch again."},
+                      indent=2, ensure_ascii=False)
+
+
+# ===========================================================================
 # GOOGLE ANALYTICS (GA4) + SEARCH CONSOLE - review the user's own traffic data.
 # The user connects their Google account once (Connect Google Analytics in the
 # dashboard); these tools read it live. Read-only.
 # ===========================================================================
+def _current_site_id():
+    """Best-effort: the DB id of the site the tools are currently acting on, so we
+    can look up THAT site's own Google account (each site can connect a different
+    Gmail for its Search Console). Returns None if it can't be resolved (then the
+    user-level default Google connection is used)."""
+    import db as _db
+    cfg = _cfg()
+    uid = cfg.get("user_id")
+    su = (cfg.get("site_url") or "").rstrip("/")
+    if not uid or not su:
+        return None
+    try:
+        m = _db.get_site_by_ref(uid, su)
+        return m.get("id") if m else None
+    except Exception:
+        return None
+
+
 def _google_ctx():
-    """Return (access_token, account) for the current user, or raise a friendly
-    error telling them to connect / pick a property."""
+    """Return (access_token, account) for the CURRENT SITE's Google connection (or
+    the user-level default), or raise a friendly error."""
     import db as _db
     import google_api as _g
     uid = _cfg().get("user_id")
     if not uid:
         raise RuntimeError("No user context for this request.")
-    rt = _db.get_google_refresh_token(uid)
+    sid = _current_site_id()
+    rt = _db.get_google_refresh_token(uid, site_id=sid)
     if not rt:
-        raise RuntimeError("Google Analytics is not connected. Open your wptaskify "
-                           "dashboard and click 'Connect Google Analytics' first.")
+        raise RuntimeError("Google Analytics is not connected for this site. Open your "
+                           "wptaskify dashboard, select this site, and click "
+                           "'Connect Google Analytics'.")
     at = _g.access_token(rt)
     if not at:
         raise RuntimeError("Could not refresh Google access - please reconnect Google "
                            "Analytics from your dashboard.")
-    acct = _db.get_google_account(uid)
+    acct = _db.get_google_account(uid, site_id=sid)
     return at, acct
 
 
@@ -3589,8 +4034,10 @@ def ga_status() -> str:
     uid = _cfg().get("user_id")
     if not uid:
         return json.dumps({"connected": False, "error": "no user context"})
-    acct = _db.get_google_account(uid)
+    sid = _current_site_id()
+    acct = _db.get_google_account(uid, site_id=sid)
     acct["google_configured"] = _g.configured()
+    acct["for_site"] = _cfg().get("site_url", "")
     return json.dumps(acct, indent=2, ensure_ascii=False)
 
 
@@ -3602,20 +4049,60 @@ def ga_list_properties() -> str:
     import db as _db
     import google_api as _g
     at, acct = _google_ctx()
-    props = _g.list_ga_properties(at)
-    sites = _g.list_sc_sites(at)
+    props, ga_err = _g.list_ga_properties(at)
+    sites, sc_err = _g.list_sc_sites(at)
     uid = _cfg().get("user_id")
+    sid = _current_site_id()
     # Auto-select a lone property / site for convenience.
     if len(props) == 1 and not acct.get("ga_property_id"):
-        _db.set_google_selection(uid, ga_property_id=props[0]["property_id"])
+        _db.set_google_selection(uid, ga_property_id=props[0]["property_id"], site_id=sid)
         acct["ga_property_id"] = props[0]["property_id"]
     if len(sites) == 1 and not acct.get("sc_site"):
-        _db.set_google_selection(uid, sc_site=sites[0]["site"])
+        _db.set_google_selection(uid, sc_site=sites[0]["site"], site_id=sid)
         acct["sc_site"] = sites[0]["site"]
-    return json.dumps({"ga4_properties": props, "search_console_sites": sites,
-                       "selected_property": acct.get("ga_property_id", ""),
-                       "selected_sc_site": acct.get("sc_site", "")},
-                      indent=2, ensure_ascii=False)
+    out = {"ga4_properties": props, "search_console_sites": sites,
+           "selected_property": acct.get("ga_property_id", ""),
+           "selected_sc_site": acct.get("sc_site", "")}
+    # Surface real errors instead of a silent empty list (the usual cause is an API
+    # not enabled in the Google Cloud project, or no properties on this account).
+    if ga_err:
+        out["ga_error"] = ga_err
+        if "SERVICE_DISABLED" in ga_err or "has not been used" in ga_err or "403" in ga_err:
+            out["ga_hint"] = ("Enable the 'Google Analytics Admin API' in your Google "
+                              "Cloud project (APIs & Services > Library), then reconnect.")
+    if sc_err:
+        out["sc_error"] = sc_err
+        if "SERVICE_DISABLED" in sc_err or "has not been used" in sc_err or "403" in sc_err:
+            out["sc_hint"] = ("Enable the 'Google Search Console API' in your Google "
+                              "Cloud project, and make sure this Google account has a "
+                              "verified Search Console site.")
+    if not props and not ga_err:
+        out["ga_note"] = "No GA4 properties found on this Google account."
+    if not sites and not sc_err:
+        out["sc_note"] = "No Search Console sites found on this Google account."
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def ga_select(ga_property_id: str = "", sc_site: str = "") -> str:
+    """Choose WHICH Google Analytics 4 property and/or Search Console site to use
+    for this account. Pass a GA4 property ID (digits, e.g. '123456789') and/or a
+    Search Console site URL exactly as shown by ga_list_properties (e.g.
+    'https://completewaterguide.com/'). Only non-empty values change. Requires a
+    connected Google account."""
+    import db as _db
+    uid = _cfg().get("user_id")
+    if not uid:
+        return json.dumps({"error": "no user context"})
+    sid = _current_site_id()
+    if not _db.get_google_refresh_token(uid, site_id=sid):
+        return json.dumps({"error": "Google is not connected for this site. Connect it in the dashboard first."})
+    if not ga_property_id and not sc_site:
+        return json.dumps({"error": "pass ga_property_id and/or sc_site to select."})
+    _db.set_google_selection(uid,
+                             ga_property_id=ga_property_id.strip() if ga_property_id else None,
+                             sc_site=sc_site.strip() if sc_site else None, site_id=sid)
+    return json.dumps(_db.get_google_account(uid, site_id=sid), indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -3623,6 +4110,7 @@ def ga_overview(days: int = 28) -> str:
     """Google Analytics traffic overview for the last `days`: users, sessions,
     pageviews, engagement, bounce, avg session duration. Requires a connected
     Google account + selected GA4 property (see ga_status / ga_list_properties)."""
+    _require_tier('paid')
     import google_api as _g
     at, acct = _google_ctx()
     pid = _ga_property(acct)
@@ -3639,6 +4127,7 @@ def ga_overview(days: int = 28) -> str:
 def ga_top_pages(days: int = 28, limit: int = 15) -> str:
     """Top pages by pageviews in the last `days` (path, views, users, avg engagement).
     Great for finding your best content. Requires a connected GA4 property."""
+    _require_tier('paid')
     import google_api as _g
     at, acct = _google_ctx()
     pid = _ga_property(acct)
@@ -3656,6 +4145,7 @@ def ga_traffic_sources(days: int = 28, limit: int = 15) -> str:
     """Where traffic comes from in the last `days`: channel + source/medium with
     users and sessions. Shows organic vs direct vs referral vs social. Requires a
     connected GA4 property."""
+    _require_tier('paid')
     import google_api as _g
     at, acct = _google_ctx()
     pid = _ga_property(acct)
@@ -3673,6 +4163,7 @@ def ga_search_queries(days: int = 28, limit: int = 25) -> str:
     """Google Search Console: the top search QUERIES bringing you clicks in the last
     `days` (query, clicks, impressions, CTR%, avg position). This is real Google
     search data. Requires a connected Search Console site (see ga_status)."""
+    _require_tier('paid')
     import google_api as _g
     import datetime as _dt  # only for formatting the date window
     at, acct = _google_ctx()
@@ -3694,6 +4185,7 @@ def ga_search_pages(days: int = 28, limit: int = 25) -> str:
     """Google Search Console: the top PAGES by clicks from Google search in the last
     `days` (page, clicks, impressions, CTR%, avg position). Requires a connected
     Search Console site."""
+    _require_tier('paid')
     import google_api as _g
     import datetime as _dt
     at, acct = _google_ctx()

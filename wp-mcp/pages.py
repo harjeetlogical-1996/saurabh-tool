@@ -3,6 +3,7 @@ Server-rendered HTML pages for the WP MCP SaaS.
 Modern dark theme (Space Grotesk + DM Sans, slate + green accent),
 glassmorphism, SVG icons. No build step - pure HTML/CSS strings.
 """
+import json  # used by the services pages' FAQ/Service schema
 
 BRAND = "wptaskify"  # product name
 
@@ -991,6 +992,49 @@ _SOCIAL_ICONS = {
 }
 
 
+# WhatsApp contact numbers (two agents handle chats). Displayed as a floating
+# button in the corner + on the contact page.
+_WHATSAPP_NUMBERS = [
+    ("917015178387", "+91 70151 78387"),
+    ("919468307774", "+91 94683 07774"),
+]
+_WA_ICON = ('<svg viewBox="0 0 32 32" width="30" height="30" fill="currentColor" aria-hidden="true">'
+            '<path d="M16.003 3C9.38 3 4 8.38 4 15c0 2.36.69 4.56 1.88 6.42L4 29l7.77-1.85A11.9 11.9 0 0 0 16 27c6.62 0 12-5.38 12-12S22.62 3 16.003 3zm0 21.8c-1.9 0-3.68-.56-5.17-1.52l-.37-.23-4.6 1.1 1.12-4.48-.24-.38A9.76 9.76 0 0 1 6.2 15c0-5.41 4.4-9.8 9.8-9.8 5.41 0 9.8 4.39 9.8 9.8s-4.39 9.8-9.8 9.8zm5.37-7.34c-.29-.15-1.73-.85-2-.95-.27-.1-.46-.15-.66.15-.19.29-.76.95-.93 1.14-.17.19-.34.22-.63.07-.29-.15-1.24-.46-2.36-1.46-.87-.78-1.46-1.74-1.63-2.03-.17-.29-.02-.45.13-.6.13-.13.29-.34.44-.51.15-.17.19-.29.29-.48.1-.19.05-.36-.02-.51-.07-.15-.66-1.59-.9-2.18-.24-.57-.48-.49-.66-.5l-.56-.01c-.19 0-.51.07-.77.36-.27.29-1.01.99-1.01 2.42 0 1.43 1.04 2.81 1.18 3 .15.19 2.05 3.13 4.97 4.39.69.3 1.24.48 1.66.61.7.22 1.33.19 1.83.12.56-.08 1.73-.71 1.97-1.39.24-.68.24-1.27.17-1.39-.07-.12-.26-.19-.55-.34z"/>'
+            '</svg>')
+
+
+def _whatsapp_float():
+    """A floating WhatsApp button (bottom-right) that opens a small menu with our two
+    contact numbers. Present on every public page."""
+    items = "".join(
+        f'<a class=wa-num href="https://wa.me/{digits}" target="_blank" rel="noopener">'
+        f'{_WA_ICON}<span>Chat on WhatsApp<br><b>{label}</b></span></a>'
+        for digits, label in _WHATSAPP_NUMBERS)
+    return (
+        '<div class=wa-widget>'
+        f'<div class=wa-menu>{items}</div>'
+        f'<button class=wa-fab type=button aria-label="Chat on WhatsApp" '
+        'onclick="this.parentNode.classList.toggle(\'open\')">'
+        f'{_WA_ICON}</button>'
+        '</div>'
+        '<style>'
+        '.wa-widget{position:fixed;right:20px;bottom:20px;z-index:900;'
+        'display:flex;flex-direction:column;align-items:flex-end;gap:12px}'
+        '.wa-fab{width:58px;height:58px;border-radius:50%;border:none;cursor:pointer;'
+        'background:#25D366;color:#fff;display:flex;align-items:center;justify-content:center;'
+        'box-shadow:0 6px 20px rgba(37,211,102,.45);transition:transform .15s}'
+        '.wa-fab:hover{transform:scale(1.06)}'
+        '.wa-menu{display:none;flex-direction:column;gap:8px}'
+        '.wa-widget.open .wa-menu{display:flex}'
+        '.wa-num{display:flex;align-items:center;gap:10px;background:#fff;color:#14131A;'
+        'text-decoration:none;padding:10px 14px;border-radius:12px;font-size:.9rem;'
+        'box-shadow:0 6px 18px rgba(0,0,0,.14);border:1px solid #E9E8EF;line-height:1.3}'
+        '.wa-num svg{color:#25D366;flex-shrink:0}'
+        '.wa-num b{font-family:\'Sora\',sans-serif}'
+        '@media(max-width:600px){.wa-widget{right:14px;bottom:14px}}'
+        '</style>')
+
+
 def _social_bar():
     """Footer social icons. DYNAMIC: renders only the platforms the admin filled in
     (from the DB). Returns empty string if none are set, so the footer stays clean."""
@@ -1026,6 +1070,7 @@ def _nav(cta="both"):
     """Shared top nav header. cta: 'both' (Log in + Get started), 'login'
     (only Log in), 'signup' (only Get started), or 'none'."""
     links = ('<a href="/features">Features</a><a href="/tools">Tools</a>'
+             '<a href="/services">Services</a>'
              '<a href="/how-it-works">How it works</a>'
              '<a href="/pricing">Pricing</a><a href="/community">Community</a><a href="/faq">FAQ</a>')
     if cta == "both":
@@ -1347,7 +1392,7 @@ subscription, and nothing goes live without your approval.</p>
 <div class=foot-top>
   <div>{_logo()}<p style="color:var(--muted);max-width:320px;margin-top:10px;font-size:.9rem">Connect your WordPress site to AI (Claude &amp; ChatGPT) and put it on autopilot - write, optimize and publish automatically.</p></div>
   <div class=foot-links>
-    <div><h4>Product</h4><a href="/features">Features</a><a href="/tools">Tools</a><a href="/how-it-works">How it works</a><a href="/pricing">Pricing</a><a href="/faq">FAQ</a></div>
+    <div><h4>Product</h4><a href="/features">Features</a><a href="/tools">Tools</a><a href="/services">Services</a><a href="/how-it-works">How it works</a><a href="/pricing">Pricing</a><a href="/faq">FAQ</a></div>
     <div><h4>Company</h4><a href="/about">About</a><a href="/contact">Contact</a><a href="/blog">Blog</a><a href="/community">Community</a><a href="/security">Security</a></div>
     <div><h4>Legal</h4><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refund">Refund Policy</a><a href="/shipping">Delivery</a></div>
   </div>
@@ -1355,6 +1400,7 @@ subscription, and nothing goes live without your approval.</p>
 {_social_bar()}
 <div class=foot-bottom>&copy; 2026 {BRAND}. Connect WordPress to AI - write, optimize &amp; publish with Claude &amp; ChatGPT.</div>
 </div></footer>
+{_whatsapp_float()}
 {_SCRIPTS}
 </body></html>"""
 
@@ -1386,7 +1432,7 @@ def _auth(mode, error="", authorize_next=""):
 <div class=field><label for=email>Email</label>
 <input id=email name=email type=email placeholder="you@example.com" autocomplete=email required></div>
 <div class=field><label for=password>Password</label>
-<input id=password name=password type=password placeholder="••••••••" autocomplete={pw_autocomplete} minlength=6 required></div>
+<input id=password name=password type=password placeholder="••••••••" autocomplete={pw_autocomplete} minlength=8 required></div>
 <button class="btn btn-primary btn-block btn-lg" type=submit>{cta}</button>
 </form>
 <div class=auth-alt>{alt}</div>
@@ -1430,7 +1476,7 @@ def _content_page(title, description, body_html, canonical="/", keywords="", sch
 <div class=foot-top>
   <div>{_logo()}</div>
   <div class=foot-links>
-    <div><h4>Product</h4><a href="/features">Features</a><a href="/tools">Tools</a><a href="/how-it-works">How it works</a><a href="/pricing">Pricing</a><a href="/faq">FAQ</a></div>
+    <div><h4>Product</h4><a href="/features">Features</a><a href="/tools">Tools</a><a href="/services">Services</a><a href="/how-it-works">How it works</a><a href="/pricing">Pricing</a><a href="/faq">FAQ</a></div>
     <div><h4>Company</h4><a href="/about">About</a><a href="/contact">Contact</a><a href="/blog">Blog</a><a href="/community">Community</a><a href="/security">Security</a></div>
     <div><h4>Legal</h4><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refund">Refund Policy</a><a href="/shipping">Delivery</a></div>
   </div>
@@ -1497,6 +1543,7 @@ def _content_page(title, description, body_html, canonical="/", keywords="", sch
 .light-zone .doc .fcta .fcta-fine{{color:#8A8792!important;font-size:.88rem;margin:16px 0 0}}
 @media(max-width:640px){{.page-hero{{height:220px}}}}
 </style>
+{_whatsapp_float()}
 </body></html>"""
 
 
@@ -1545,13 +1592,21 @@ def privacy_page():
 <p>To provide and secure the Service, connect your site to AI, process payments, send account emails (verification, password reset), and improve the product.</p>
 <h2>3. AI processing</h2>
 <p>When you use the AI, your instructions and relevant site content are sent to your chosen AI provider (Claude or ChatGPT) and, for images, to Google Gemini, to produce the requested result. Their handling of that data is governed by their own privacy policies.</p>
-<h2>4. Data sharing</h2>
-<p>We do not sell your data. We share data only with the service providers needed to run wptaskify (hosting, database, email, payments, AI) and when required by law.</p>
-<h2>5. Security</h2>
+<h2>4. Google Analytics &amp; Search Console (optional connection)</h2>
+<p>If you choose to connect your Google account, wptaskify requests <strong>read-only</strong> access to your Google Analytics and Google Search Console data using these scopes:</p>
+<ul>
+<li><code>analytics.readonly</code> - to read your Google Analytics 4 reports (sessions, pageviews, top pages, traffic sources).</li>
+<li><code>webmasters.readonly</code> - to read your Search Console performance (search queries, clicks, impressions, positions).</li>
+</ul>
+<p>We use this access only to show you, and let your chosen AI assistant summarise, your own traffic and search performance inside wptaskify. We store an encrypted Google refresh token so we can fetch this data on your behalf; we never write to, modify, or delete anything in your Google account, and we do not use this data for advertising.</p>
+<p><strong>Limited Use:</strong> wptaskify's use and transfer of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements. You can disconnect your Google account at any time from your dashboard, which removes our stored token; you can also revoke access at <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">myaccount.google.com/permissions</a>.</p>
+<h2>5. Data sharing</h2>
+<p>We do not sell your data. We share data only with the service providers needed to run wptaskify (hosting, database, email, payments, AI) and when required by law. Data obtained from Google APIs is not shared beyond providing this feature to you.</p>
+<h2>6. Security</h2>
 <p>Credentials are encrypted, accounts are isolated, and access is restricted. No system is perfectly secure, but we take reasonable measures to protect your data.</p>
-<h2>6. Your rights</h2>
+<h2>7. Your rights</h2>
 <p>You can access, correct, or delete your account data, and disconnect your sites, at any time. To request deletion, contact us.</p>
-<h2>7. Contact</h2>
+<h2>8. Contact</h2>
 <p>Privacy questions? Reach us via the <a href="/contact">contact page</a>.</p>
 """
     return _content_page("Privacy Policy", "How wptaskify collects, uses, and protects your data.", body, canonical="/privacy",
@@ -1771,23 +1826,497 @@ def about_page():
                          keywords="about wptaskify, wordpress ai automation, ai wordpress tool")
 
 
-def contact_page():
-    body = """
-<p>We'd love to hear from you - questions, feedback, or help getting set up.</p>
-<div class=card>
-<h3>Email</h3>
-<p>Reach us at <a href="mailto:hello@wptaskify.com">hello@wptaskify.com</a>. We usually reply within 1–2 business days.</p>
+_CONTACT_SERVICES = [
+    ("", "General question"),
+    ("custom-ai-tools", "Custom AI tool / plugin"),
+    ("wordpress-ai-setup", "AI integration"),
+    ("ai-content-writing", "AI app / content"),
+    ("ai-seo-optimization", "AI SEO"),
+]
+
+
+def contact_page(service="", sent=False, error=""):
+    if sent:
+        body = """
+<div class=card style="border-color:var(--accent);text-align:center">
+<h3>Thanks - we've got your message.</h3>
+<p>We usually reply within 1–2 business days. Keep an eye on your inbox
+(and spam folder, just in case).</p>
+<p><a class="btn btn-primary" href="/">Back to home</a></p>
 </div>
-<div class=card>
-<h3>Support</h3>
-<p>Already have an account? Log in and use your dashboard - or email us with your account email and we'll help fast.</p>
-</div>
-<h2>Common questions</h2>
-<p>Many answers are on our <a href="/faq">FAQ</a>. For account, billing, or connection issues, email us and include your site URL so we can help quickly.</p>
 """
-    return _content_page("Contact wptaskify", "Contact the wptaskify team - support, questions and feedback.", body, canonical="/contact",
+        return _content_page("Message sent - wptaskify", "Thanks for reaching out - we'll reply soon.",
+                             body, canonical="/contact",
+                             hero_img=f"{SITE_BASE}/assets/hero-contact.webp",
+                             hero_sub="Thanks for reaching out.")
+
+    # Build the service dropdown, pre-selecting the one they came from.
+    opts = "".join(
+        f'<option value="{val}"{" selected" if val == service else ""}>{lbl}</option>'
+        for val, lbl in _CONTACT_SERVICES)
+    err_html = (f'<div class="notice" style="background:#FEF6F4;border:1px solid #F6D9D1;'
+                f'color:#B23A28;padding:12px 16px;border-radius:10px;margin-bottom:16px">{error}</div>'
+                if error else "")
+    body = f"""
+{err_html}
+<p>Tell us what you need - a quote for a project, a question, or help getting set up.
+We read every message and reply within 1–2 business days.</p>
+
+<form method="post" action="/contact" class="contact-form">
+  <div class=cf-row>
+    <label>Your name
+      <input name="name" type="text" required maxlength="200" placeholder="Jane Doe">
+    </label>
+    <label>Email
+      <input name="email" type="email" required maxlength="200" placeholder="you@example.com">
+    </label>
+  </div>
+  <label>What's this about?
+    <select name="service">{opts}</select>
+  </label>
+  <label>Your message
+    <textarea name="message" rows="6" required maxlength="5000"
+      placeholder="Tell us about your site/goal, what you need, and any budget or timeline."></textarea>
+  </label>
+  <button class="btn btn-primary btn-hero" type="submit">Send message</button>
+  <p style="font-size:.85rem;color:#8A8792;margin-top:10px">Prefer email? Write to
+  <a href="mailto:hello@wptaskify.com">hello@wptaskify.com</a>.</p>
+</form>
+
+<div class=card style="border-color:#25D366">
+<h3>Prefer WhatsApp?</h3>
+<p>Message us directly - we usually reply fast.</p>
+<p style="display:flex;flex-wrap:wrap;gap:10px">
+<a class="btn" style="background:#25D366;color:#fff;border-color:#25D366" href="https://wa.me/917015178387" target="_blank" rel="noopener">WhatsApp +91 70151 78387</a>
+<a class="btn" style="background:#25D366;color:#fff;border-color:#25D366" href="https://wa.me/919468307774" target="_blank" rel="noopener">WhatsApp +91 94683 07774</a>
+</p>
+</div>
+
+<h2>Common questions</h2>
+<p>Many answers are on our <a href="/faq">FAQ</a>. Already a customer? Log in and use
+your dashboard, or include your site URL so we can help quickly.</p>
+
+<style>
+.contact-form{{max-width:640px;margin:8px 0 8px;display:grid;gap:16px}}
+.contact-form label{{display:grid;gap:6px;font-weight:600;color:#14131A;font-size:.95rem}}
+.contact-form input,.contact-form select,.contact-form textarea{{
+  font:inherit;padding:12px 14px;border:1px solid #D9D7E2;border-radius:10px;
+  background:#fff;color:#14131A;width:100%}}
+.contact-form input:focus,.contact-form select:focus,.contact-form textarea:focus{{
+  outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.12)}}
+.cf-row{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
+@media(max-width:600px){{.cf-row{{grid-template-columns:1fr}}}}
+</style>
+"""
+    return _content_page("Contact wptaskify", "Contact the wptaskify team - get a quote, ask a question, or get help.",
+                         body, canonical="/contact",
                          hero_img=f"{SITE_BASE}/assets/hero-contact.webp",
-                         hero_sub="Questions, feedback, or help getting set up.")
+                         hero_sub="Get a quote, ask a question, or get help getting set up.",
+                         wide=True)
+
+
+# ===========================================================================
+# DONE-FOR-YOU SERVICES (agency offering: setup + custom tools + content)
+# Hub at /services + 4 service pages. Quote-only (contact CTA), no fixed price.
+# ===========================================================================
+def _svc_cta(service_slug="", label="Get a free quote"):
+    """A strong quote CTA that tags the lead by service. Adds a small risk-reversal
+    line so the ask feels safe (drives conversions)."""
+    href = "/contact?service=" + service_slug if service_slug else "/contact"
+    return (f'<div class=svc-cta><h3>Every week you wait, someone else ships it first.</h3>'
+            f'<p>Tell us your goal today - you\'ll get a clear plan and a fixed, '
+            f'no-obligation quote. Nothing is charged until you say go.</p>'
+            f'<a class="btn btn-primary btn-hero" href="{href}">{label}</a>'
+            f'<p class=svc-cta-fine>Free quote &middot; You own the result &middot; '
+            f'Nothing goes live without your approval</p></div>')
+
+
+def _svc_stakes(heading, points):
+    """"Cost of waiting" block - agitates the pain before we present the solution.
+    `points` is a list of short 'what it's costing you' lines."""
+    check = _CHECK
+    items = "".join(f'<li>{check}<span>{p}</span></li>' for p in points)
+    return (f'<div class=svc-stakes><h2>{heading}</h2>'
+            f'<ul class=svc-list>{items}</ul></div>')
+
+
+_SVC_CSS = """
+<style>
+.svc-hero-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:26px 0}
+.svc-card{background:#F8F7FB;border:1px solid #E9E8EF;border-radius:16px;padding:22px}
+.svc-card h3{font-family:'Sora';font-size:1.12rem;margin:0 0 8px;color:#14131A}
+.svc-card p{margin:0;color:#5B5966;line-height:1.6;font-size:.95rem}
+.svc-aud{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin:20px 0}
+.svc-aud a{display:block;background:#fff;border:1px solid #E9E8EF;border-radius:14px;
+  padding:18px 20px;text-decoration:none;transition:.15s}
+.svc-aud a:hover{border-color:var(--accent);transform:translateY(-2px)}
+.svc-aud b{display:block;color:#14131A;font-family:'Sora';margin-bottom:4px}
+.svc-aud span{color:#5B5966;font-size:.9rem}
+.svc-steps{counter-reset:s;list-style:none;padding:0;margin:22px 0;display:grid;gap:14px}
+.svc-steps li{position:relative;padding-left:52px;color:#3A3846;line-height:1.6}
+.svc-steps li:before{counter-increment:s;content:counter(s);position:absolute;left:0;top:-2px;
+  width:36px;height:36px;border-radius:10px;background:var(--accent);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-family:'Sora';font-weight:700}
+.svc-list{list-style:none;padding:0;margin:16px 0;display:grid;gap:10px}
+.svc-list li{display:flex;gap:10px;align-items:flex-start;color:#3A3846;line-height:1.55}
+.svc-list svg{color:var(--accent);flex-shrink:0;margin-top:3px}
+.svc-cta{background:linear-gradient(135deg,#14131A,#2A2833);color:#fff;border-radius:20px;
+  padding:36px 32px;margin:36px 0;text-align:center}
+.svc-cta h3{font-family:'Sora';font-size:1.5rem;margin:0 0 8px;color:#fff}
+.svc-cta p{color:#C9C7D2;margin:0 0 18px}
+.svc-cta .btn{margin:0 auto}
+.svc-cta-fine{font-size:.85rem;color:#9A97A6;margin-top:14px}
+.svc-cta-fine a{color:#fff;text-decoration:underline}
+.svc-stakes{background:#FEF6F4;border:1px solid #F6D9D1;border-left:4px solid #E0533D;
+  border-radius:16px;padding:8px 24px 22px;margin:26px 0}
+.svc-stakes h2{color:#B23A28}
+.svc-stakes .svc-list svg{color:#E0533D}
+@media(max-width:760px){.svc-hero-cards,.svc-aud{grid-template-columns:1fr}}
+</style>
+"""
+
+
+def services_page():
+    """Hub page - independent AI development agency (custom AI tools, integrations,
+    AI apps/sites, AI content). wptaskify is our own product; here we BUILD custom
+    AI solutions for clients."""
+    schema = ('{"@context":"https://schema.org","@type":"ProfessionalService",'
+              '"name":"wptaskify - AI Development Services",'
+              '"serviceType":"Custom AI development, AI integrations, AI apps and AI content",'
+              '"provider":{"@type":"Organization","name":"wptaskify","url":"https://wptaskify.com"},'
+              '"areaServed":"Worldwide",'
+              '"description":"We build custom AI solutions: AI tools and plugins for WordPress, AI integrations for any site, AI-powered web apps, and AI content at scale. Tell us your goal and we build it."}')
+    check = _CHECK
+    body = f"""
+<p>AI is quietly redrawing every market right now - and the businesses that move
+first are pulling ahead while everyone else "plans to get to it." If you have an idea
+for an AI tool, integration, or app but no team to build it, that idea is worth
+nothing until it ships. We're an AI development studio that ships. Tell us what you
+want to achieve, and we build a custom AI solution around <strong>your</strong> goal:
+a WordPress AI plugin, an AI feature inside your site, a full AI-powered web app, or
+done-for-you AI content. You own the result.</p>
+
+<p>We build with the leading AI models - Claude, ChatGPT (OpenAI), and Gemini - and
+choose the right one for your use case. We built and run our own AI platform, so we
+know how to ship AI that's reliable, safe, and genuinely useful - not a demo that
+breaks in production.</p>
+
+<h2>What we build</h2>
+<div class=svc-hero-cards>
+  <div class=svc-card><h3>Custom AI tools &amp; plugins</h3><p>A WordPress plugin or tool that does exactly what you need - an AI writer, chatbot, product-description generator, support assistant, data workflow, or any custom automation.</p></div>
+  <div class=svc-card><h3>AI integrations</h3><p>Add AI to your existing site or software - connect ChatGPT, Claude, or Gemini to your content, data, or customer workflows, with the right guardrails.</p></div>
+  <div class=svc-card><h3>AI apps &amp; websites</h3><p>A complete AI-powered web app or website built from scratch - the idea in your head, shipped as a real, working product.</p></div>
+  <div class=svc-card><h3>AI content &amp; SEO</h3><p>Done-for-you AI content and SEO for your site - articles, product copy, on-page optimization and schema, produced at scale with a human check.</p></div>
+</div>
+
+<h2>Explore each service</h2>
+<div class=svc-aud>
+  <a href="/services/custom-ai-tools"><b>Custom AI tools &amp; plugins</b><span>WordPress plugins and AI automations built for you.</span></a>
+  <a href="/services/wordpress-ai-setup"><b>AI integrations</b><span>Connect AI to your site, data and workflows.</span></a>
+  <a href="/services/ai-content-writing"><b>AI apps &amp; content</b><span>Full AI apps and done-for-you AI content.</span></a>
+  <a href="/services/ai-seo-optimization"><b>AI SEO</b><span>Rank and get cited by AI search engines.</span></a>
+</div>
+
+<h2>Why work with us</h2>
+<ul class=svc-list>
+  <li>{check}<span><strong>We ship real products, not demos.</strong> We run our own AI platform ({TOTAL_TOOLS}+ live tools), so we build AI that holds up in production.</span></li>
+  <li>{check}<span><strong>You own everything.</strong> The code, the tool, the content - it's yours. We agree scope and ownership up front.</span></li>
+  <li>{check}<span><strong>Any AI, the right AI.</strong> Claude, ChatGPT, Gemini or open models - we pick what fits your use case and budget, not what locks you in.</span></li>
+  <li>{check}<span><strong>Clear scope, fixed quote.</strong> No vague hourly surprises - we quote the project so you know exactly what you're getting.</span></li>
+  <li>{check}<span><strong>Built safely.</strong> Backups, testing, and your sign-off before anything ships to your live site.</span></li>
+</ul>
+
+<h2>How it works</h2>
+<ol class=svc-steps>
+  <li><strong>Tell us your goal</strong> - describe the AI tool, feature, or outcome you want. A quick form or call, no commitment.</li>
+  <li><strong>We scope &amp; quote</strong> - we turn your idea into a concrete plan with a clear, no-obligation price and timeline.</li>
+  <li><strong>We build it</strong> - we design, build and test your custom AI solution, keeping you updated.</li>
+  <li><strong>Delivery &amp; support</strong> - you get the finished product (and its code), a walkthrough, and support after launch.</li>
+</ol>
+
+{_svc_cta("", "Tell us what to build")}
+
+<h2>Frequently asked questions</h2>
+<details class="faq-item"><summary>What kind of AI solutions do you build?</summary><p>Custom AI tools and WordPress plugins, AI integrations into existing sites and software, full AI-powered web apps, and done-for-you AI content and SEO. If it involves AI, tell us the goal and we'll tell you how we'd build it.</p></details>
+<details class="faq-item"><summary>Do I have to use wptaskify's platform?</summary><p>No. wptaskify is our own product, but these are independent development services - we build whatever solution fits your goal, on the stack and AI models that suit you. You own the result.</p></details>
+<details class="faq-item"><summary>Which AI models do you use?</summary><p>Whichever is best for your use case - Claude, ChatGPT (OpenAI), Gemini, or open-source models. We advise on cost, quality and privacy trade-offs.</p></details>
+<details class="faq-item"><summary>How much does it cost?</summary><p>Every project is scoped to your needs, so we quote per project - a clear, fixed price with no hourly surprises. Tell us what you want and we'll send a quote, no obligation.</p></details>
+<details class="faq-item"><summary>Do I own the code and the tool?</summary><p>Yes. Deliverables are yours - we agree scope and ownership before we start.</p></details>
+<details class="faq-item"><summary>Can you work with my existing site or product?</summary><p>Yes - we add AI to what you already have, or build something new from scratch, whichever makes sense.</p></details>
+{_SVC_CSS}
+"""
+    return _content_page(
+        "AI Development Services - Custom AI Tools, Apps & Integrations",
+        "We build custom AI solutions: AI tools & plugins for WordPress, AI integrations for any site, AI-powered web apps, and AI content at scale. Tell us your goal - get a free quote.",
+        body, canonical="/services",
+        keywords="custom ai development, ai development services, custom ai tool development, ai integration services, build ai app, ai wordpress plugin development, hire ai developer",
+        schema_json=schema,
+        hero_img=f"{SITE_BASE}/assets/hero-features.webp",
+        hero_sub="Custom AI tools, integrations and apps - built around your goal. You own the result.",
+        wide=True)
+
+
+def _service_detail(slug, title, h1, hero_sub, meta_desc, keywords, intro,
+                    deliverables, faqs, intro2="", who_for=None, use_cases=None,
+                    why_us=None, outcomes_h="", outcomes=None,
+                    stakes_h="", stakes=None):
+    """Build one service detail page. Follows the Pain-Agitate-Solve pattern: the
+    intro DRAWS the problem, the stakes block AGITATES the cost of waiting, then the
+    rest SOLVES it. Optional intro2/who_for/use_cases/why_us/outcomes make it rich."""
+    check = _CHECK
+    dl = "".join(f'<li>{check}<span>{d}</span></li>' for d in deliverables)
+    faq_html = "".join(
+        f'<details class="faq-item"><summary>{q}</summary><p>{a}</p></details>'
+        for q, a in faqs)
+    faq_schema_items = ",".join(
+        '{"@type":"Question","name":%s,"acceptedAnswer":{"@type":"Answer","text":%s}}'
+        % (json.dumps(q), json.dumps(a)) for q, a in faqs)
+    schema = ('{"@context":"https://schema.org","@graph":['
+              '{"@type":"Service","serviceType":%s,'
+              '"provider":{"@type":"Organization","name":"wptaskify","url":"https://wptaskify.com"},'
+              '"areaServed":"Worldwide","description":%s},'
+              '{"@type":"FAQPage","mainEntity":[%s]}]}'
+              % (json.dumps(h1), json.dumps(meta_desc), faq_schema_items))
+
+    intro2_html = f"<p>{intro2}</p>" if intro2 else ""
+
+    who_html = ""
+    if who_for:
+        items = "".join(f'<li>{check}<span>{w}</span></li>' for w in who_for)
+        who_html = f"<h2>Who this is for</h2><ul class=svc-list>{items}</ul>"
+
+    cases_html = ""
+    if use_cases:
+        cards = "".join(
+            f'<div class=svc-card><h3>{c["t"]}</h3><p>{c["d"]}</p></div>'
+            for c in use_cases)
+        cases_html = f"<h2>What you can ask us to do</h2><div class=svc-hero-cards>{cards}</div>"
+
+    why_html = ""
+    if why_us:
+        items = "".join(f'<li>{check}<span>{w}</span></li>' for w in why_us)
+        why_html = f"<h2>Why choose wptaskify</h2><ul class=svc-list>{items}</ul>"
+
+    outcomes_html = ""
+    if outcomes:
+        items = "".join(f'<li>{check}<span>{o}</span></li>' for o in outcomes)
+        outcomes_html = f"<h2>{outcomes_h or 'What you get'}</h2><ul class=svc-list>{items}</ul>"
+
+    stakes_html = ""
+    if stakes:
+        stakes_html = _svc_stakes(stakes_h or "What waiting is costing you", stakes)
+
+    body = f"""
+<p>{intro}</p>
+{intro2_html}
+{stakes_html}
+<h2>What's included</h2>
+<ul class=svc-list>{dl}</ul>
+{cases_html}
+{who_html}
+{outcomes_html}
+<h2>How it works</h2>
+<ol class=svc-steps>
+  <li><strong>Share your goals</strong> - a short form about your site and what you need. No commitment.</li>
+  <li><strong>We scope &amp; quote</strong> - we review your site, agree the plan, and send a clear, no-obligation price and timeline.</li>
+  <li><strong>We deliver, you approve</strong> - we do the work in your dashboard's approval queue. Nothing goes live until you say go, and every file change is backed up first.</li>
+  <li><strong>Handover &amp; support</strong> - you keep full control of your site and AI, with a walkthrough and support after delivery.</li>
+</ol>
+{why_html}
+{_svc_cta(slug)}
+<h2>Frequently asked questions</h2>
+{faq_html}
+<p style="margin-top:22px;color:#8A8792">Explore all our <a href="/services">AI development services</a>, or <a href="/contact">get in touch</a>.</p>
+{_SVC_CSS}
+"""
+    return _content_page(h1, meta_desc, body, canonical="/services/" + slug,
+                         keywords=keywords, schema_json=schema,
+                         hero_img=f"{SITE_BASE}/assets/hero-features.webp",
+                         hero_sub=hero_sub, wide=True)
+
+
+def service_custom_tools_page():
+    return _service_detail(
+        "custom-ai-tools",
+        "Custom AI Tool & WordPress Plugin Development",
+        "Custom AI Tool & WordPress Plugin Development",
+        "Have an idea for an AI tool? We design and build it for you.",
+        "Custom AI development: we build AI-powered tools, WordPress plugins and automations around your exact idea. You own the code. Get a free quote.",
+        "custom ai tool development, custom wordpress ai plugin development, build ai wordpress plugin, ai automation development, hire ai developer, ai plugin developer",
+        "You have the AI idea - the tool, the plugin, the automation that would save hours or win customers. But it's still just an idea, because you don't have a team to build it. Meanwhile, someone in your space is shipping theirs. We turn your idea into a real, working AI product - designed, built, tested, and yours to keep.",
+        ["A custom AI tool or WordPress plugin built to your spec",
+         "AI automations wired into your content, data or media workflows",
+         "The right AI model chosen for you - Claude, ChatGPT or Gemini",
+         "Integrations with your existing tools, plugins and APIs",
+         "Tested, documented, and handed over as yours - with support"],
+        [("What kinds of AI tools do you build?", "Chatbots and support assistants, AI content and product-description generators, custom SEO automations, data and research tools, image/media pipelines, internal workflow tools - if AI can do it, we can build it around your goal."),
+         ("Is this only for WordPress?", "No. WordPress plugins are a specialty, but we also build standalone AI tools, scripts and services for any stack."),
+         ("Will it work with my theme and plugins?", "Yes - we build to fit your existing setup and test for compatibility before shipping."),
+         ("Do I own the code?", "Yes. Deliverables are 100% yours - we agree scope and ownership before we start."),
+         ("How much does it cost?", "We quote per project after a quick scoping call, so you get a clear fixed price - no hourly surprises.")],
+        intro2="We build production-grade AI - not demos that break under real use. Because we build and run our own AI platform, we know how to handle prompts, cost, rate limits, safety and edge cases so your tool actually works day after day.",
+        use_cases=[
+            {"t": "AI chatbot / assistant", "d": "A branded assistant trained on your content that answers visitors or supports customers 24/7."},
+            {"t": "Content generator", "d": "One-click AI drafts, product descriptions, or bulk content - in your voice, on your site."},
+            {"t": "Custom automation", "d": "Automate a repetitive task - tagging, summarizing, moderating, enriching data - with AI in the loop."},
+            {"t": "Integration", "d": "Connect an AI model to your CRM, store, docs or API so it works with the data you already have."},
+        ],
+        who_for=[
+            "Founders and businesses with an AI idea but no dev team",
+            "Agencies who want to offer (or white-label) custom AI builds",
+            "Site owners who need a specific tool that no plugin provides",
+        ],
+        why_us=[
+            "We ship real, reliable AI - proven by our own live platform",
+            "You own the code and can take it anywhere",
+            "Fixed, transparent project quotes",
+            "Safe delivery: testing, backups and your sign-off",
+        ],
+        stakes_h="The cost of leaving it as \"just an idea\"",
+        stakes=[
+            "Every month it isn't built is a month a competitor can build it first",
+            "Hours your team burns on tasks AI could do in seconds - week after week",
+            "A cheap freelancer's \"AI demo\" that looks fine but breaks the moment real users hit it",
+            "Trying to learn it yourself and losing weeks you could have spent on your business",
+        ])
+
+
+def service_setup_page():
+    return _service_detail(
+        "wordpress-ai-setup",
+        "AI Integration Services",
+        "AI Integration Services - Add AI to Your Site or Software",
+        "We connect AI to your existing site, data and workflows.",
+        "AI integration services: we add AI to your existing website or software - connect Claude, ChatGPT or Gemini to your content, data and workflows, safely. Get a free quote.",
+        "ai integration services, add ai to my website, integrate chatgpt into website, ai api integration, connect ai to wordpress, ai integration developer",
+        "Your customers already expect AI - instant answers, smart search, help at 2am. Right now your site makes them wait, dig, or leave. Every visitor who doesn't get a fast answer is a sale that quietly walks to a competitor whose site already \"gets it.\" We add AI to the site or product you already have, so it works with your real data - accurate, safe, and cost-controlled.",
+        ["Connect Claude, ChatGPT or Gemini to your existing site/app",
+         "Wire AI into your real data - content, catalog, docs, CRM or API",
+         "Guardrails: prompt design, limits, moderation and fallbacks",
+         "Cost controls so your AI bill stays predictable",
+         "Testing and monitoring so it keeps working in production"],
+        [("Which AI can you integrate?", "Claude, ChatGPT (OpenAI), Gemini, or open-source models - we recommend the best fit for your use case, quality needs and budget."),
+         ("Can you integrate AI into a non-WordPress site?", "Yes - any website, web app or software with an API. WordPress is a specialty, not a limit."),
+         ("How do you control AI costs?", "We add caching, rate limits and model choices so usage stays efficient and your monthly bill is predictable."),
+         ("Is my data safe?", "Yes - we design the integration so only the data you intend is sent, with clear privacy handling. We advise on models with stronger privacy where needed."),
+         ("How much does it cost?", "Scoped per project with a clear fixed quote after a short call.")],
+        intro2="An AI integration is more than an API call. We design the prompts, choose the model, add safety and cost guardrails, connect it to your actual data, and test it against real inputs - so what you launch is dependable, not a fragile demo.",
+        use_cases=[
+            {"t": "AI on your content", "d": "Let visitors ask questions and get answers drawn from your own articles, docs or products."},
+            {"t": "AI in your product", "d": "Add an AI feature - summarize, generate, recommend - inside your existing app or dashboard."},
+            {"t": "Workflow AI", "d": "Insert AI into a business process: support triage, lead qualification, data enrichment."},
+            {"t": "Search & Q&A", "d": "AI-powered search or a Q&A assistant grounded in your knowledge base."},
+        ],
+        who_for=[
+            "Businesses that want AI features without rebuilding their site",
+            "SaaS/product teams adding an AI capability to their app",
+            "WordPress owners who want AI connected to their real content",
+        ],
+        why_us=[
+            "We integrate the right model, not just the popular one",
+            "Guardrails and cost controls built in from day one",
+            "You keep ownership and control of everything",
+            "Tested against real data before it goes live",
+        ],
+        stakes_h="What a site without AI is quietly costing you",
+        stakes=[
+            "Visitors who don't find a fast answer bounce - and buy elsewhere",
+            "Your support team answers the same questions over and over, by hand",
+            "Competitors with AI-powered sites feel modern; yours feels dated",
+            "A botched DIY integration that leaks data or runs up a surprise AI bill",
+        ])
+
+
+def service_content_page():
+    return _service_detail(
+        "ai-content-writing",
+        "AI Apps & Done-For-You AI Content",
+        "AI Apps & Done-For-You AI Content",
+        "Full AI web apps built from scratch, plus AI content at scale.",
+        "We build AI-powered web apps from scratch and produce done-for-you AI content and SEO articles at scale, with a human check. Get a free quote.",
+        "build ai app, ai web app development, ai app developer, done for you ai content, ai content writing service, ai seo articles",
+        "That AI app idea has been sitting in your notes for months. That content calendar is three weeks behind - again. Ideas don't make money; shipped products and published pages do. While you wait for the \"right time,\" the window is closing and the competition is publishing. We ship the finished result for you: a complete AI web app built from scratch, or a steady stream of quality AI content - done, live, and yours.",
+        ["AI-powered web apps and websites, built from scratch",
+         "SEO articles written, optimized and published to your site",
+         "Product copy and descriptions at scale for stores",
+         "On-page SEO, schema and internal links included",
+         "A human review pass so quality and accuracy stay high"],
+        [("Can you build a full AI app, not just a plugin?", "Yes - we build complete AI-powered web apps and websites from scratch, front to back, and hand them over as yours."),
+         ("Is the content unique?", "Yes - everything is generated for your site and topic, then reviewed by a human. We never republish canned articles."),
+         ("How much content can you produce?", "From a few pieces a month to large batches - we scope to your goals and budget."),
+         ("Will Google penalize AI content?", "Google rewards helpful, accurate content regardless of how it's produced. We optimize for exactly that and keep a person in the loop."),
+         ("Do I own the app and content?", "Yes - the app, code and content are all yours.")],
+        intro2="For apps, you get a real, working product - designed, built and tested - not a prototype. For content, you get articles and copy that are planned around genuine search intent, optimized on-page, and checked by a human, so they're something you're proud to publish.",
+        use_cases=[
+            {"t": "AI SaaS / tool", "d": "A standalone AI product - the idea in your head, shipped as a real app people can use."},
+            {"t": "AI website", "d": "A modern site with AI features baked in - chat, personalization, generation."},
+            {"t": "Content engine", "d": "A steady pipeline of SEO articles published straight to your WordPress."},
+            {"t": "Store copy", "d": "AI product descriptions and category pages at scale for ecommerce."},
+        ],
+        who_for=[
+            "Founders who want an AI app built without hiring a team",
+            "Bloggers and content sites that need articles at scale",
+            "Ecommerce stores that need product copy and SEO at volume",
+        ],
+        why_us=[
+            "We ship finished products, not prototypes",
+            "Human-checked content - quality over quantity",
+            "SEO and AI-search (GEO/AEO) baked in",
+            "You own the app, the code and the content",
+        ],
+        stakes_h="What staying stuck at \"idea\" costs you",
+        stakes=[
+            "The market moves on while your app sits unbuilt in a doc",
+            "An empty or stale blog that Google - and buyers - quietly ignore",
+            "Competitors publishing weekly while you publish once a quarter",
+            "Months lost trying to do it all yourself instead of running your business",
+        ])
+
+
+def service_seo_page():
+    return _service_detail(
+        "ai-seo-optimization",
+        "AI SEO Services",
+        "AI SEO Services - Rank & Get Cited by AI Search",
+        "We optimize your site to rank on Google and get cited by AI engines.",
+        "AI SEO services: we audit and fix on-page SEO, meta, schema and internal links, and optimize for AI search (GEO/AEO) so ChatGPT, Perplexity and AI Overviews cite you. Get a free quote.",
+        "ai seo services, ai seo agency, geo optimization service, aeo optimization, get cited by chatgpt, ai search optimization, wordpress seo service",
+        "Your customers are asking ChatGPT, Perplexity and Google AI Overviews the exact questions your business answers - and getting someone else's brand as the reply. AI now answers directly, so fewer people ever click a blue link. If your content isn't structured to be cited, you're becoming invisible in the one place buyers are looking - and most site owners have no idea it's happening. We make your site rank on Google AND get cited inside AI answers, before your competitors lock in that spot.",
+        ["Full on-page SEO audit with prioritized, high-impact fixes",
+         "Meta titles/descriptions, headings and internal linking",
+         "Structured data (schema) for rich results",
+         "GEO/AEO: quotable answers, entities and citations for AI engines",
+         "Broken-link, duplicate and thin-content cleanup"],
+        [("What is GEO/AEO?", "GEO (Generative Engine Optimization) and AEO (Answer Engine Optimization) mean structuring your content so AI engines like ChatGPT, Perplexity, Gemini and Google AI Overviews can understand and cite it. It's the new frontier of SEO, and most sites aren't doing it yet."),
+         ("Will this work with my current SEO plugin?", "Yes - we work alongside or replace your existing setup and make sure there are no duplicate tags."),
+         ("Do you guarantee rankings?", "No honest agency can guarantee rankings. We fix the technical and on-page factors within your control to give you the best possible shot."),
+         ("Can you do this at scale?", "Yes - we apply fixes across hundreds of pages efficiently, with your approval."),
+         ("How much does it cost?", "Scoped per project or as an ongoing retainer, with a clear quote after a short audit.")],
+        intro2="Most SEO agencies still only optimize for Google's classic results. We do that too - but we also make your content citation-ready for AI answer engines, which are increasingly where people get answers. That means clear, quotable statements, proper schema, strong entities and E-E-A-T signals AI models look for.",
+        use_cases=[
+            {"t": "SEO audit & fixes", "d": "Find and fix what's holding your rankings back - technical, on-page and content issues."},
+            {"t": "AI-search readiness", "d": "Make your pages quotable and citable by ChatGPT, Perplexity and AI Overviews."},
+            {"t": "Content optimization", "d": "Rework existing articles to rank and answer the questions people actually ask."},
+            {"t": "Schema & structure", "d": "Add the structured data that unlocks rich results and AI citations."},
+        ],
+        who_for=[
+            "Sites that rank okay but want more search traffic",
+            "Brands that want to show up inside AI answers, not just Google",
+            "Stores and blogs with lots of pages needing SEO at scale",
+        ],
+        why_us=[
+            "We optimize for Google AND AI search - most don't",
+            "Real fixes applied at scale, not just a report",
+            "Backed by our own AI SEO tooling",
+            "Honest about what SEO can and can't promise",
+        ],
+        stakes_h="What poor SEO is costing you right now",
+        stakes=[
+            "AI answers cite a competitor instead of you - and you never even see it",
+            "Rankings slipping while sites that optimized for AI search climb past you",
+            "Traffic (and leads) leaking away as fewer people click past AI answers",
+            "Months of great content that Google barely shows because it isn't optimized",
+        ])
 
 
 _FORUM_CSS = """
@@ -2032,7 +2561,7 @@ def _blog_footer():
         '<div class=foot-top>'
         f'<div>{_logo()}</div>'
         '<div class=foot-links>'
-        '<div><h4>Product</h4><a href="/features">Features</a><a href="/tools">Tools</a><a href="/how-it-works">How it works</a><a href="/pricing">Pricing</a><a href="/faq">FAQ</a></div>'
+        '<div><h4>Product</h4><a href="/features">Features</a><a href="/tools">Tools</a><a href="/services">Services</a><a href="/how-it-works">How it works</a><a href="/pricing">Pricing</a><a href="/faq">FAQ</a></div>'
         '<div><h4>Company</h4><a href="/about">About</a><a href="/contact">Contact</a><a href="/blog">Blog</a><a href="/community">Community</a><a href="/security">Security</a></div>'
         '<div><h4>Legal</h4><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refund">Refund Policy</a><a href="/shipping">Delivery</a></div>'
         '</div></div>'
@@ -2419,6 +2948,34 @@ def how_page():
 </section>
 
 <section class=fsec>
+<h2>Connecting Claude or ChatGPT</h2>
+<p>wptaskify uses one secure connector URL that both Claude and ChatGPT understand. In your AI, add a custom connector, paste the URL, and sign in with your wptaskify account.</p>
+<div class=code-box style="margin:16px 0;max-width:520px"><span>https://wptaskify.com/mcp</span></div>
+<div class=conn-grid>
+  <div class=conn-card>
+    <h3>Claude</h3>
+    <ol>
+      <li>Open <strong>Settings &rarr; Connectors</strong> (claude.ai or the desktop app).</li>
+      <li>Click <strong>Add custom connector</strong>.</li>
+      <li>Name it <strong>wptaskify</strong> and paste the URL above.</li>
+      <li>Click <strong>Connect</strong>, sign in to wptaskify, and you're done - your 100+ tools appear in the chat.</li>
+    </ol>
+    <p class=conn-note>Available on Claude Pro, Team, and Enterprise.</p>
+  </div>
+  <div class=conn-card>
+    <h3>ChatGPT</h3>
+    <ol>
+      <li>You need a paid plan (<strong>Plus, Pro, Business or Enterprise</strong>).</li>
+      <li>Open <strong>Settings &rarr; Connectors</strong>. If you don't see "Add custom connector", first turn on <strong>Settings &rarr; Advanced &rarr; Developer mode</strong>.</li>
+      <li>Add a custom connector, name it <strong>wptaskify</strong>, paste the URL, and choose <strong>OAuth</strong>.</li>
+      <li>Click <strong>Connect</strong>, sign in to wptaskify, and select the connector in your chat.</li>
+    </ol>
+    <p class=conn-note>ChatGPT's custom connectors are rolling out gradually - if the option is missing, it's your ChatGPT plan/region, not your site.</p>
+  </div>
+</div>
+</section>
+
+<section class=fsec>
 <h2>Then just ask - here are real examples</h2>
 <div class=hex-grid>{ex_html}</div>
 <p style="text-align:center;color:#8A8792;font-size:.9rem;margin-top:16px">The AI picks the right tool from 100+ and does the work. See <a href="/tools">all tools -&gt;</a>.</p>
@@ -2449,7 +3006,13 @@ def how_page():
 .hex{{display:flex;gap:11px;align-items:flex-start;background:#F8F7FB;border:1px solid #E9E8EF;
   border-radius:14px;padding:16px 18px;color:#3A3846;font-size:.98rem;font-style:italic}}
 .hex svg{{color:var(--accent);flex-shrink:0;margin-top:3px}}
-@media(max-width:700px){{.hstep{{grid-template-columns:1fr}}.hex-grid{{grid-template-columns:1fr}}}}
+.conn-grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px}}
+.conn-card{{background:#F8F7FB;border:1px solid #E9E8EF;border-radius:16px;padding:22px 24px}}
+.conn-card h3{{font-family:'Sora';font-size:1.15rem;color:#14131A;margin:0 0 12px}}
+.conn-card ol{{margin:0;padding-left:20px;color:#3A3846;line-height:1.7}}
+.conn-card ol li{{margin:6px 0}}
+.conn-note{{margin:14px 0 0;color:#8A8792;font-size:.85rem}}
+@media(max-width:700px){{.hstep{{grid-template-columns:1fr}}.hex-grid{{grid-template-columns:1fr}}.conn-grid{{grid-template-columns:1fr}}}}
 </style>
 """
     # HowTo schema (procedural) - AEO for "how to connect wordpress to claude/chatgpt".
@@ -3349,9 +3912,14 @@ def login_page(error="", authorize_next=""):
 # ---------------------------------------------------------------------------
 # Email verify + password reset pages
 # ---------------------------------------------------------------------------
-def verify_sent_page(email="", resent=False):
-    note = ('<div class="alert ok" style="margin-bottom:18px">Verification email re-sent.</div>'
-            if resent else '')
+def verify_sent_page(email="", resent=False, toofast=False):
+    if toofast:
+        note = ('<div class="alert err" style="margin-bottom:18px">You\'ve requested this a '
+                'few times already. Please wait a few minutes before resending.</div>')
+    elif resent:
+        note = ('<div class="alert ok" style="margin-bottom:18px">Verification email re-sent.</div>')
+    else:
+        note = ''
     to = f' to <strong>{_e_html(email)}</strong>' if email else ''
     return _head(f"Verify your email - {BRAND}") + f"""
 <div class=auth-wrap><div class=auth-card>
@@ -3504,7 +4072,7 @@ def reset_page(token, error=""):
 <form method=post action=/reset>
 <input type=hidden name=token value="{_e_html(token)}">
 <div class=field><label for=password>New password</label>
-<input id=password name=password type=password placeholder="••••••••" autocomplete=new-password minlength=6 required></div>
+<input id=password name=password type=password placeholder="••••••••" autocomplete=new-password minlength=8 required></div>
 <button class="btn btn-primary btn-block btn-lg" type=submit>Update password</button>
 </form>
 </div></div></body></html>"""
@@ -3616,9 +4184,29 @@ def _plan_section(plan, account, toolcall_account, token_account,
     sub_status = usage.get("sub_status", "none")
     renews_at = usage.get("renews_at")
     resets_on = usage.get("resets_on", "the 1st")
+    csrf = usage.get("csrf", "")
+    is_paid = plan not in ("", "free", "unlimited")
+    # Cancel control - only for a paid, still-active subscription (not already canceled/unlimited).
+    cancel_ctl = ""
+    if is_paid and sub_status == "active":
+        end_txt = f' Your plan stays active until <strong>{renews_at[:10]}</strong>.' if renews_at else ''
+        cancel_ctl = (
+            f'<form method=post action=/cancel-plan style="margin-top:10px" '
+            f'onsubmit="return confirm(\'Cancel your plan? You keep your current plan until '
+            f'the end of the paid period, then move to Free. No further charges.\')">'
+            f'<input type=hidden name=csrf value="{csrf}">'
+            f'<button class="btn btn-ghost mini" type=submit '
+            f'style="color:var(--muted2)">Cancel plan</button>'
+            f'<span class=hint style="margin-left:8px">Cancel anytime.{end_txt}</span></form>')
     if plan == "free" or plan == "":
         renew_line = (f'You are on the free plan. Your monthly free allowance '
                       f'resets on <strong>{resets_on}</strong>.')
+    elif sub_status == "canceled":
+        renew_line = (f'<span class="pill">Canceled</span> Your plan will move to Free on '
+                      f'<strong>{renews_at[:10] if renews_at else resets_on}</strong>. '
+                      f'You can re-subscribe below any time.')
+    elif sub_status == "expired":
+        renew_line = 'Your paid plan has expired. Renew below to continue.'
     elif sub_status == "active" and renews_at:
         renew_line = (f'<span class="pill ok">Active</span> Your plan renews on '
                       f'<strong>{renews_at[:10]}</strong>. Allowance resets on <strong>{resets_on}</strong>.')
@@ -3627,6 +4215,7 @@ def _plan_section(plan, account, toolcall_account, token_account,
     else:
         renew_line = (f'Your current allowance resets on <strong>{resets_on}</strong>. '
                       f'Upgrade below for higher monthly limits.')
+    renew_line += cancel_ctl
 
     # ---- usage breakdown (what you used this month) ----
     actions_used = usage.get("actions_used", 0)
@@ -3692,54 +4281,147 @@ def _e_html(x):
     return _h.escape(str(x if x is not None else ""))
 
 
-def _google_section(google, public_url, csrf="", configured=True):
-    """Google Analytics + Search Console connect card for the dashboard."""
-    g = google or {}
-    connected = g.get("connected")
+def _google_conn_card(title, subtitle, conn, public_url, csrf, site_id="", opts=None):
+    """One Google-connection card. When connected, shows DROPDOWNS auto-populated
+    with the account's real GA4 properties + Search Console sites (no manual typing),
+    plus a list of what's available. `site_id` empty = account-level default."""
+    sid_input = f'<input type=hidden name=site_id value="{_e_html(site_id)}">' if site_id else ""
+    connect_href = f"{public_url}/google/connect" + (f"?site={_e_html(site_id)}" if site_id else "")
+    if not conn or not conn.get("connected"):
+        return (f'<div class="gconn">'
+                f'<div class=gconn-head><b>{title}</b><span>{subtitle}</span></div>'
+                f'<a class="btn btn-primary" href="{connect_href}">Connect Google</a>'
+                f'</div>')
+    email = _e_html(conn.get("google_email", ""))
+    cur_prop = conn.get("ga_property_id", "")
+    cur_scs = conn.get("sc_site", "")
+    opts = opts or {}
+    props = opts.get("properties", [])
+    scsites = opts.get("sites", [])
+    err = opts.get("error", "")
+
+    def _field(label, name, items, cur, label_of, val_of, empty_msg):
+        """Smart field: 0 items -> a note (no control); 1 item -> auto-selected,
+        shown as read-only text + a hidden input (nothing to pick); 2+ -> dropdown."""
+        n = len(items)
+        if n == 0:
+            return f'<div class=gfield><span class=glbl>{label}</span><span class=gnone>{empty_msg}</span></div>'
+        if n == 1:
+            it = items[0]
+            v = val_of(it)
+            return (f'<div class=gfield><span class=glbl>{label}</span>'
+                    f'<span class=gone>{_e_html(label_of(it))}</span>'
+                    f'<input type=hidden name={name} value="{_e_html(v)}"></div>')
+        # 2+ -> dropdown
+        o = '<option value="">— select —</option>' + "".join(
+            f'<option value="{_e_html(val_of(it))}"'
+            f'{" selected" if val_of(it)==cur else ""}>{_e_html(label_of(it))}</option>'
+            for it in items)
+        return (f'<label class=gfield><span class=glbl>{label}</span>'
+                f'<select name={name}>{o}</select></label>')
+
+    prop_field = _field(
+        "GA4 property", "ga_property_id", props, cur_prop,
+        lambda p: (p.get("display_name") or p["property_id"]) + f' ({p["property_id"]})',
+        lambda p: p["property_id"],
+        "No GA4 property found on this account." +
+        (" (Enable the Google Analytics Admin API, then reconnect.)" if err else ""))
+    scs_field = _field(
+        "Search Console site", "sc_site", scsites, cur_scs,
+        lambda s: s["site"], lambda s: s["site"],
+        "No Search Console site found on this account." +
+        (" (Enable the Search Console API, then reconnect.)" if err else ""))
+
+    err_html = f'<p class=gconn-err>{_e_html(err)}</p>' if err else ""
+    # Only show Save when there's an actual choice to make (a dropdown present).
+    has_dropdown = len(props) > 1 or len(scsites) > 1
+    save_btn = '<button class="btn" type=submit>Save selection</button>' if has_dropdown else ''
+
+    return (
+        f'<div class="gconn">'
+        f'<div class=gconn-head><b>{title}</b> <span class="pill ok">connected</span>'
+        f'<span>{subtitle} · {email}</span></div>'
+        f'{err_html}'
+        f'<form method=post action="{public_url}/google/select" class=gconn-form>'
+        f'<input type=hidden name=csrf value="{csrf}">{sid_input}'
+        f'{prop_field}{scs_field}{save_btn}</form>'
+        f'<form method=post action="{public_url}/google/disconnect" style="margin-top:8px">'
+        f'<input type=hidden name=csrf value="{csrf}">{sid_input}'
+        f'<button class="btn btn-ghost" type=submit>Disconnect</button></form>'
+        f'</div>')
+
+
+def _google_section(google, public_url, csrf="", configured=True, sites=None,
+                    google_all=None, google_opts=None):
+    """Google Analytics + Search Console. Per-SITE Google accounts (each WordPress
+    site can connect a different Gmail), an account-level default, auto-populated
+    property/site dropdowns, and an 'add another account' option."""
     if not configured:
         return """
 <div class=panel>
   <h2>Google Analytics</h2>
   <p class=hint>Analytics connection isn't available yet. Please check back soon.</p>
 </div>"""
-    if not connected:
-        return f"""
-<div class=panel>
-  <h2>Google Analytics &amp; Search Console</h2>
-  <p class=hint>Connect your Google account so your AI can review your real traffic,
-  top pages, and Google search queries. Read-only - we never change anything.</p>
-  <a class="btn btn-primary" href="{public_url}/google/connect">Connect Google Analytics</a>
-</div>"""
-    email = _e_html(g.get("google_email", ""))
-    prop = _e_html(g.get("ga_property_id", ""))
-    site = _e_html(g.get("sc_site", ""))
-    prop_txt = prop if prop else "not selected yet"
-    site_txt = site if site else "not selected yet"
+    sites = sites or []
+    google_all = google_all or []
+    google_opts = google_opts or {}
+    by_site = {}
+    default_conn = None
+    for a in google_all:
+        if a.get("site_id"):
+            by_site[a["site_id"]] = {"connected": True, **a}
+        else:
+            default_conn = {"connected": True, **a}
+    if default_conn is None:
+        default_conn = google or {"connected": False}
+
+    cards = _google_conn_card(
+        "Account default", "Used for any site without its own Google account",
+        default_conn, public_url, csrf, site_id="", opts=google_opts.get(""))
+
+    site_cards = ""
+    for s in sites:
+        if s.get("status", "active") != "active":
+            continue
+        sid = s.get("id", "")
+        url = _e_html(s.get("site_url", ""))
+        site_cards += _google_conn_card(
+            url or "This site", "Its own Google / Search Console account",
+            by_site.get(sid), public_url, csrf, site_id=sid, opts=google_opts.get(sid))
+
+    # "Add another Google account" (re-runs consent so a different Gmail can be picked).
+    add_btn = (f'<a class="btn btn-ghost" href="{public_url}/google/connect">'
+               f'+ Add another Google account</a>')
+
     return f"""
 <div class=panel>
-  <h2>Google Analytics &amp; Search Console <span class="pill ok">connected</span></h2>
-  <p class=hint>Connected as <strong>{email}</strong>. Your AI can now review your
-  traffic and search data (read-only).</p>
-  <p class=hint>GA4 property: <strong>{prop_txt}</strong> &nbsp;·&nbsp;
-     Search Console site: <strong>{site_txt}</strong></p>
-  <p class=hint>Ask your AI: "how's my traffic this month?", "top 10 pages", or
-     "which search queries bring clicks?" It will pick your property automatically,
-     or you can set it explicitly below.</p>
-  <form method=post action="{public_url}/google/select" style="margin:10px 0">
-    <input type=hidden name=csrf value="{csrf}">
-    <label class=hint>GA4 property ID
-      <input name=ga_property_id value="{prop}" placeholder="e.g. 123456789" style="max-width:220px">
-    </label>
-    <label class=hint>Search Console site
-      <input name=sc_site value="{site}" placeholder="https://yoursite.com/" style="max-width:280px">
-    </label>
-    <button class="btn" type=submit>Save</button>
-  </form>
-  <form method=post action="{public_url}/google/disconnect" style="margin-top:6px">
-    <input type=hidden name=csrf value="{csrf}">
-    <button class="btn btn-ghost" type=submit>Disconnect Google</button>
-  </form>
-</div>"""
+  <h2>Google Analytics &amp; Search Console</h2>
+  <p class=hint>Connect Google so your AI can review your real traffic, top pages and
+  search queries (read-only). Your GA4 properties and Search Console sites load
+  automatically - just pick them from the dropdowns. If a site's Search Console is on
+  a different Google account, connect that account on the site's own card below.</p>
+  <div class=gconn-grid>
+    {cards}
+    {site_cards}
+  </div>
+  <div style="margin-top:14px">{add_btn}</div>
+  <p class=hint style="margin-top:12px">Then ask your AI: "how's my traffic this
+  month?", "top 10 pages", or "which search queries bring clicks?"</p>
+</div>
+<style>
+.gconn-grid{{display:grid;gap:14px;margin-top:12px}}
+.gconn{{border:1px solid var(--border);border-radius:12px;padding:16px 18px;background:var(--surface)}}
+.gconn-head{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}}
+.gconn-head span{{color:var(--muted2);font-size:.85rem}}
+.gconn-err{{font-size:.82rem;color:#B23A28;background:#FEF6F4;border:1px solid #F6D9D1;
+  padding:8px 10px;border-radius:8px;margin:4px 0 10px}}
+.gconn-form{{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin:6px 0}}
+.gfield{{display:flex;flex-direction:column;gap:5px}}
+.glbl{{font-size:.8rem;color:var(--muted2);font-weight:600}}
+.gfield select{{min-width:220px;padding:8px 10px;border:1px solid var(--border);border-radius:8px}}
+.gone{{font-weight:600;color:var(--fg,#14131A);font-size:.95rem}}
+.gnone{{color:var(--muted);font-size:.9rem}}
+</style>"""
 
 
 def _settings_section(profile):
@@ -3778,12 +4460,12 @@ def _settings_section(profile):
 
 <div class=panel>
   <h2>Password</h2>
-  <p class=hint>Choose a new password (at least 6 characters).</p>
+  <p class=hint>Choose a new password (at least 8 characters).</p>
   <form method=post action=/settings/password class=set-form>
     <div class=field><label for=cp>Current password</label>
     <input id=cp name=current type=password autocomplete=current-password required></div>
     <div class=field><label for=np>New password</label>
-    <input id=np name=new type=password minlength=6 autocomplete=new-password required></div>
+    <input id=np name=new type=password minlength=8 autocomplete=new-password required></div>
     <button class="btn btn-primary" type=submit>Update password</button>
   </form>
 </div>
@@ -3927,10 +4609,12 @@ def _affiliate_section(aff, public_url, csrf="", verified=True):
 def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="", verified=True,
               token_account=None, chat_enabled=True, toolcall_account=None,
               country="", txns=None, usage=None, profile=None, csrf="", affiliate=None,
-              google=None, google_configured=True):
+              google=None, google_configured=True, google_all=None, google_opts=None):
     connect = f"{public_url}/mcp" if public_url else "(set PUBLIC_URL)"
     settings_html = _settings_section(profile or {"email": email, "verified": verified})
-    google_html = _google_section(google or {}, public_url, csrf, google_configured)
+    google_html = _google_section(google or {}, public_url, csrf, google_configured,
+                                  sites=sites, google_all=google_all or [],
+                                  google_opts=google_opts or {})
     affiliate_html = _affiliate_section(affiliate or {}, public_url, csrf, verified)
     plugin_url = f"{public_url}/plugin/wp-pilot-seo.zip" if public_url else "/plugin/wp-pilot-seo.zip"
     account = account or {"plan": "free", "credits": 5, "has_own_key": False}
@@ -3945,6 +4629,22 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
         "pro": 60, "agency": 250, "chat_starter": 50, "chat_pro": 150, "chat_max": 250,
     }.get(plan, 5)
     pct = 100 if has_key else int(min(credits, plan_max) / plan_max * 100)
+    # Display helper: an effectively-unlimited allowance (owner / special accounts,
+    # set to ~1,000,000) reads as "Unlimited" instead of an ugly raw number like
+    # 999969. Every real image plan is <= 250, so this only ever triggers for
+    # unlimited accounts. Normal numbers get thousands separators.
+    _UNLIMITED_AT = 100000
+    def _fmt_credits(n):
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            return str(n)
+        return "Unlimited" if n >= _UNLIMITED_AT else f"{n:,}"
+    # If the monthly cap is unlimited, the "left" count should read Unlimited too
+    # (not "999,969 / Unlimited").
+    _img_unlimited = plan_max >= _UNLIMITED_AT
+    credits_disp = "Unlimited" if _img_unlimited else _fmt_credits(credits)
+    plan_max_disp = _fmt_credits(plan_max)
 
     if sites:
         items = "".join(
@@ -4003,9 +4703,11 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
             f'<div class=tool-grid>{cards}</div></div>')
 
     # ---- PLAN section: current plan + usage + all plans + top-ups + history ----
+    _usage = dict(usage or {})
+    _usage.setdefault("csrf", csrf)  # for the Cancel-plan form
     plan_html = _plan_section(plan, account, toolcall_account, token_account,
                               credits, plan_max, has_key, country, txns or [],
-                              chat_enabled, usage or {})
+                              chat_enabled, _usage)
 
     # ---- compact plan+usage snapshot for the Overview ----
     _pn = {"free": "Free", "owai_mini": "Mini", "owai_starter": "Starter",
@@ -4022,10 +4724,14 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
         _act_row = (f'<div class=ov-use><div class=ov-lbl>AI actions</div>'
                     f'<div class=ov-val>{_tcl:,} <small>/ {_tcm:,}</small></div></div>'
                     f'<div class=use-track><div class=use-fill style="width:{_ap}%"></div></div>')
-    if True:
+    if _img_unlimited:
+        _img_row = ('<div class=ov-use><div class=ov-lbl>AI images</div>'
+                    '<div class=ov-val>Unlimited</div></div>'
+                    '<div class=use-track><div class=use-fill style="width:100%"></div></div>')
+    else:
         _ip = int(min(credits, plan_max) / plan_max * 100) if plan_max else 0
         _img_row = (f'<div class=ov-use><div class=ov-lbl>AI images</div>'
-                    f'<div class=ov-val>{credits} <small>/ {plan_max}</small></div></div>'
+                    f'<div class=ov-val>{credits_disp} <small>/ {plan_max_disp}</small></div></div>'
                     f'<div class=use-track><div class=use-fill style="width:{_ip}%"></div></div>')
     _resets = (usage or {}).get("resets_on", "the 1st")
     overview_plan = (
@@ -4070,12 +4776,14 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
   </a>
   <nav class=side-nav>
     <button class="side-link active" data-sec=overview>{_icon(ic_home)}<span>Overview</span></button>
+    <button class="side-link" data-sec=plugin>{_icon('<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/>')}<span>Get the Plugin</span></button>
     <button class="side-link" data-sec=sites>{_icon(ic_sites)}<span>My Sites</span></button>
     <div class=side-sub id=sites-sub>
       <button class="side-link sub-item" data-sec=addsite><span class=sub-dot></span><span>Connect Site</span></button>
     </div>
     <button class="side-link" data-sec=tools>{_icon(ic_tools)}<span>AI Tools</span></button>
     <button class="side-link" data-sec=connect>{_icon(ic_ai)}<span>AI Connect</span></button>
+    <button class="side-link" data-sec=analytics>{_icon('<line x1=18 y1=20 x2=18 y2=10/><line x1=12 y1=20 x2=12 y2=4/><line x1=6 y1=20 x2=6 y2=14/>')}<span>Analytics</span></button>
     <button class="side-link" data-sec=plan>{_icon('<path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/>')}<span>Plan &amp; Usage</span></button>
     <button class="side-link" data-sec=affiliate>{_icon('<circle cx=18 cy=5 r=3/><circle cx=6 cy=12 r=3/><circle cx=18 cy=19 r=3/><line x1=8.6 y1=10.7 x2=15.4 y2=6.3/><line x1=8.6 y1=13.3 x2=15.4 y2=17.7/>')}<span>Refer &amp; Earn</span></button>
     <button class="side-link" data-sec=settings>{_icon('<circle cx=12 cy=12 r=3/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 8 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H2a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 3.6 8a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H8a1.65 1.65 0 0 0 1-1.51V2a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V8a1.65 1.65 0 0 0 1.51 1H22a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>')}<span>Settings</span></button>
@@ -4118,7 +4826,7 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
 
   <div class=stat-grid>
     <div class=stat-card><div class=n>{sites_count}</div><div class=l>Connected sites</div></div>
-    <div class=stat-card><div class=n>{credits}</div><div class=l>Image credits left</div></div>
+    <div class=stat-card><div class=n>{credits_disp}</div><div class=l>Image credits left</div></div>
     <div class=stat-card style="cursor:pointer" onclick="showSec('tools')"><div class=n>100+</div><div class=l>AI tools available →</div></div>
   </div>
 
@@ -4222,7 +4930,19 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
       <li>Click <strong>Connect</strong> → it opens wptaskify → you're already signed in here, so it links in one click</li>
       <li>Done! Your site's {TOTAL_TOOLS}+ tools now appear inside the AI - just ask.</li>
     </ol>
+    <div class=connect-note style=margin-top:16px>{_icon("<circle cx=12 cy=12 r=10/><path d='M12 16v-4M12 8h.01'/>")}
+      <span><strong>Using ChatGPT?</strong> Custom connectors need a paid plan (Plus, Pro, Business or Enterprise). Go to <strong>Settings → Connectors</strong>; if you don't see "Add custom connector", enable <strong>Settings → Advanced → Developer mode</strong> first. Then use the same URL above and choose <strong>OAuth</strong> when asked. (Claude works on this URL directly.)</span>
+    </div>
   </div>
+</section>
+
+<!-- ANALYTICS (Google Analytics + Search Console) -->
+<section class=sec data-panel=analytics>
+  <div class=panel>
+    <h2>Analytics &amp; Search</h2>
+    <p class=hint>Connect Google Analytics and Search Console so your AI can review your real traffic, top pages and search performance - right here or from Claude/ChatGPT.</p>
+  </div>
+  {google_html}
 </section>
 
 <!-- PLAN & USAGE -->
@@ -4237,7 +4957,6 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
 
 <!-- SETTINGS -->
 <section class=sec data-panel=settings>
-{google_html}
 {settings_html}
 </section>
 
@@ -4249,7 +4968,7 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
 function showSec(name){{
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('active',s.dataset.panel===name));
   document.querySelectorAll('.side-link[data-sec]').forEach(b=>b.classList.toggle('active',b.dataset.sec===name));
-  var titles={{overview:'Overview',sites:'My Sites',addsite:'Connect Site',tools:'AI Tools',connect:'AI Connect',plugin:'wptaskify Plugin',plan:'Plan & Usage',affiliate:'Refer & Earn',settings:'Settings'}};
+  var titles={{overview:'Overview',sites:'My Sites',addsite:'Connect Site',tools:'AI Tools',connect:'AI Connect',analytics:'Analytics & Search',plugin:'wptaskify Plugin',plan:'Plan & Usage',affiliate:'Refer & Earn',settings:'Settings'}};
   document.getElementById('sectitle').textContent=titles[name]||'';
   // keep the "My Sites" parent highlighted when on Add Site, and show the submenu
   var onSites = (name==='sites'||name==='addsite');
@@ -4259,8 +4978,15 @@ function showSec(name){{
   if(history.replaceState) history.replaceState(null,'','#'+name);
 }}
 document.querySelectorAll('.side-link[data-sec]').forEach(b=>b.addEventListener('click',()=>showSec(b.dataset.sec)));
-var valid=['overview','sites','addsite','tools','connect','plugin','credits','plan','affiliate','settings'];
+var valid=['overview','sites','addsite','tools','connect','analytics','plugin','credits','plan','affiliate','settings'];
 if(location.hash){{var h=location.hash.slice(1); if(valid.includes(h)) showSec(h);}}
+// After connecting/updating Google Analytics we return to /dashboard?ok=Google...
+// - land the user back on the Analytics tab (not Overview).
+(function(){{
+  var q=new URLSearchParams(location.search);
+  var okm=(q.get('ok')||'');
+  if(/Google|Analytics/i.test(okm)) showSec('analytics');
+}})();
 // CSRF: add the session token to every same-origin POST form (defense-in-depth).
 (function(){{
   var tok="{csrf}";

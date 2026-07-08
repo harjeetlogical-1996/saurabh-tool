@@ -139,6 +139,7 @@ def _create_schema():
             ("name", "ALTER TABLE users ADD COLUMN IF NOT EXISTS name text NOT NULL DEFAULT ''"),
             ("notify_email", "ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_email boolean NOT NULL DEFAULT true"),
             ("low_img_notified", "ALTER TABLE users ADD COLUMN IF NOT EXISTS low_img_notified text NOT NULL DEFAULT ''"),
+            ("active_site_id", "ALTER TABLE users ADD COLUMN IF NOT EXISTS active_site_id uuid"),
             ("renew_notified", "ALTER TABLE users ADD COLUMN IF NOT EXISTS renew_notified text NOT NULL DEFAULT ''"),
             ("gstin", "ALTER TABLE users ADD COLUMN IF NOT EXISTS gstin text NOT NULL DEFAULT ''"),
             # Session version: bumped on password change / logout-all / ban so old signed
@@ -235,12 +236,29 @@ def _create_schema():
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_sites_user ON wordpress_sites(user_id);
         """)
+        # Contact-form leads / queries (public /contact page).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS contact_messages (
+                id          bigserial PRIMARY KEY,
+                name        text NOT NULL DEFAULT '',
+                email       text NOT NULL DEFAULT '',
+                service     text NOT NULL DEFAULT '',
+                message     text NOT NULL DEFAULT '',
+                meta        text NOT NULL DEFAULT '',   -- ip/user-agent, optional
+                status      text NOT NULL DEFAULT 'new', -- new | read | archived
+                created_at  timestamptz NOT NULL DEFAULT now()
+            );
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_contact_created ON contact_messages(created_at DESC);
+        """)
         # Google OAuth (Analytics + Search Console). We store the encrypted refresh
         # token per user; access tokens are short-lived and fetched on demand.
         # ga_property_id / sc_site are the user's chosen GA4 property + SC site.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS google_accounts (
-                user_id            uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                user_id            uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                site_id            uuid REFERENCES wordpress_sites(id) ON DELETE CASCADE,
                 refresh_token_enc  bytea NOT NULL,
                 refresh_token_nonce bytea NOT NULL,
                 google_email       text NOT NULL DEFAULT '',
@@ -249,6 +267,14 @@ def _create_schema():
                 connected_at       timestamptz NOT NULL DEFAULT now()
             );
         """)
+        # Migrate the older per-user google_accounts (user_id PRIMARY KEY) to the
+        # per-site shape: add site_id, drop the old single-row-per-user PK, and add a
+        # unique index on (user_id, site_id) so each site gets its own Google account
+        # while an existing user-level connection (site_id NULL) still works as the
+        # default. Idempotent.
+        conn.execute("ALTER TABLE google_accounts ADD COLUMN IF NOT EXISTS site_id uuid REFERENCES wordpress_sites(id) ON DELETE CASCADE;")
+        conn.execute("ALTER TABLE google_accounts DROP CONSTRAINT IF EXISTS google_accounts_pkey;")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_google_user_site ON google_accounts (user_id, COALESCE(site_id, '00000000-0000-0000-0000-000000000000'::uuid));")
         # AI SEO score history - powers the weekly report card (before -> after).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS score_snapshots (
@@ -530,10 +556,34 @@ def add_site(user_id: str, site_url: str, wp_username: str, app_password: str,
     return sid
 
 
-def get_primary_site(user_id: str):
-    """Return the user's primary site WITH decrypted app password (runtime only).
-    Returns dict {site_url, wp_username, app_password} or None."""
+def set_active_site(user_id: str, site_id):
+    """Remember which site the AI is currently working on (persists across MCP
+    requests). Pass None to clear (fall back to the primary/newest site)."""
     with _pool.connection() as conn:
+        conn.execute("UPDATE users SET active_site_id = %s WHERE id = %s",
+                     (site_id, user_id))
+
+
+def get_primary_site(user_id: str):
+    """Return the site the AI should act on WITH decrypted app password (runtime
+    only): the user's chosen active site if set and still valid, otherwise the
+    primary/newest site. Returns {site_url, wp_username, app_password} or None."""
+    with _pool.connection() as conn:
+        # 1) Honor an explicitly-chosen active site (set via use_site).
+        active_id = conn.execute(
+            "SELECT active_site_id FROM users WHERE id = %s", (user_id,)
+        ).fetchone()
+        if active_id and active_id[0]:
+            row = conn.execute(
+                """SELECT site_url, wp_username, app_password_enc, app_password_nonce
+                   FROM wordpress_sites
+                   WHERE id = %s AND user_id = %s AND status = 'active'""",
+                (active_id[0], user_id),
+            ).fetchone()
+            if row:
+                return {"site_url": row[0], "wp_username": row[1],
+                        "app_password": decrypt_secret(row[2], row[3])}
+        # 2) Fall back to primary/newest.
         row = conn.execute(
             """SELECT site_url, wp_username, app_password_enc, app_password_nonce
                FROM wordpress_sites
@@ -714,6 +764,43 @@ def get_site_by_id(user_id: str, site_id: str):
             "app_password": decrypt_secret(row[2], row[3])}
 
 
+def get_site_by_ref(user_id: str, ref: str):
+    """Resolve one of the user's sites (decrypted creds) by a flexible reference:
+    the site id, the exact site_url, or a domain substring (e.g. 'buyfrombest').
+    Returns {id, site_url, wp_username, app_password} or None. Used so the AI can
+    target a specific site when the user has several."""
+    ref = (ref or "").strip()
+    if not ref:
+        return None
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            """SELECT id, site_url, wp_username, app_password_enc, app_password_nonce
+               FROM wordpress_sites WHERE user_id = %s AND status = 'active'
+               ORDER BY is_primary DESC, created_at DESC""",
+            (user_id,),
+        ).fetchall()
+    if not rows:
+        return None
+    low = ref.lower().rstrip("/")
+    # 1) exact id  2) exact url  3) domain substring
+    best = None
+    for r in rows:
+        sid, url = str(r[0]), (r[1] or "")
+        u = url.lower().rstrip("/")
+        if sid == ref:
+            best = r; break
+        if u == low:
+            best = r; break
+    if best is None:
+        for r in rows:
+            if low in (r[1] or "").lower():
+                best = r; break
+    if best is None:
+        return None
+    return {"id": str(best[0]), "site_url": best[1], "wp_username": best[2],
+            "app_password": decrypt_secret(best[3], best[4])}
+
+
 def list_user_sites(user_id: str):
     """List a user's sites (NO password). For dashboard display."""
     with _pool.connection() as conn:
@@ -786,51 +873,76 @@ def set_user_gemini_key(user_id: str, key: str):
 # ---------------------------------------------------------------------------
 # Google (Analytics + Search Console) OAuth tokens
 # ---------------------------------------------------------------------------
-def save_google_account(user_id: str, refresh_token: str, google_email: str = ""):
-    """Store (encrypted) a user's Google refresh token. Upserts; keeps any
-    previously-chosen property/site if we're just refreshing the token."""
+# google_accounts is now per-(user, site). site_id=None is the user-level "default"
+# connection (used when a site has no Google account of its own). This lets a user
+# connect a DIFFERENT Google/Gmail for each of their WordPress sites (e.g. when each
+# site's Search Console lives on a different Google account).
+_G_SENTINEL = "00000000-0000-0000-0000-000000000000"
+
+
+def save_google_account(user_id: str, refresh_token: str, google_email: str = "",
+                        site_id: str = None):
+    """Store (encrypted) a Google refresh token for this user, optionally scoped to
+    a specific site. Upserts on (user_id, site_id)."""
     ct, nonce = encrypt_secret(refresh_token.strip())
+    sid = site_id or None
     with _pool.connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO google_accounts (user_id, refresh_token_enc, refresh_token_nonce, google_email)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (user_id) DO UPDATE SET
-                refresh_token_enc = EXCLUDED.refresh_token_enc,
-                refresh_token_nonce = EXCLUDED.refresh_token_nonce,
-                google_email = EXCLUDED.google_email,
-                connected_at = now()
-            """,
-            (user_id, ct, nonce, google_email or ""),
-        )
+        # Manual upsert keyed on (user_id, COALESCE(site_id, sentinel)) to match the
+        # unique index (Postgres ON CONFLICT can't target a COALESCE expression index
+        # directly by column list).
+        updated = conn.execute(
+            """UPDATE google_accounts
+               SET refresh_token_enc=%s, refresh_token_nonce=%s, google_email=%s, connected_at=now()
+               WHERE user_id=%s AND COALESCE(site_id,%s::uuid)=COALESCE(%s::uuid,%s::uuid)""",
+            (ct, nonce, google_email or "", user_id, _G_SENTINEL, sid, _G_SENTINEL),
+        ).rowcount
+        if not updated:
+            conn.execute(
+                """INSERT INTO google_accounts (user_id, site_id, refresh_token_enc, refresh_token_nonce, google_email)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (user_id, sid, ct, nonce, google_email or ""),
+            )
 
 
-def get_google_refresh_token(user_id: str):
-    """Return the decrypted refresh token, or None if not connected."""
-    with _pool.connection() as conn:
+def _google_row(conn, user_id, site_id, cols):
+    """Fetch a google_accounts row for (user, site). If site_id is given but that
+    site has no own connection, fall back to the user-level (site_id NULL) one."""
+    sid = site_id or None
+    if sid:
         row = conn.execute(
-            "SELECT refresh_token_enc, refresh_token_nonce FROM google_accounts WHERE user_id = %s",
-            (user_id,),
+            f"SELECT {cols} FROM google_accounts WHERE user_id=%s AND site_id=%s",
+            (user_id, sid),
         ).fetchone()
+        if row:
+            return row
+    # user-level default (site_id NULL)
+    return conn.execute(
+        f"SELECT {cols} FROM google_accounts WHERE user_id=%s AND site_id IS NULL",
+        (user_id,),
+    ).fetchone()
+
+
+def get_google_refresh_token(user_id: str, site_id: str = None):
+    """Return the decrypted refresh token for this user (or this site), or None."""
+    with _pool.connection() as conn:
+        row = _google_row(conn, user_id, site_id, "refresh_token_enc, refresh_token_nonce")
     if not row or row[0] is None:
         return None
     return decrypt_secret(row[0], row[1])
 
 
-def get_google_account(user_id: str):
-    """Return {connected, google_email, ga_property_id, sc_site} (no secrets)."""
+def get_google_account(user_id: str, site_id: str = None):
+    """Return {connected, google_email, ga_property_id, sc_site} for this user/site."""
     with _pool.connection() as conn:
-        row = conn.execute(
-            "SELECT google_email, ga_property_id, sc_site FROM google_accounts WHERE user_id = %s",
-            (user_id,),
-        ).fetchone()
+        row = _google_row(conn, user_id, site_id, "google_email, ga_property_id, sc_site")
     if not row:
         return {"connected": False, "google_email": "", "ga_property_id": "", "sc_site": ""}
     return {"connected": True, "google_email": row[0], "ga_property_id": row[1], "sc_site": row[2]}
 
 
-def set_google_selection(user_id: str, ga_property_id: str = None, sc_site: str = None):
-    """Set the chosen GA4 property and/or Search Console site."""
+def set_google_selection(user_id: str, ga_property_id: str = None, sc_site: str = None,
+                         site_id: str = None):
+    """Set the chosen GA4 property and/or Search Console site for this user/site."""
     sets, vals = [], []
     if ga_property_id is not None:
         sets.append("ga_property_id = %s")
@@ -840,17 +952,93 @@ def set_google_selection(user_id: str, ga_property_id: str = None, sc_site: str 
         vals.append(sc_site)
     if not sets:
         return
-    vals.append(user_id)
+    sid = site_id or None
+    vals += [user_id, _G_SENTINEL, sid, _G_SENTINEL]
     with _pool.connection() as conn:
         conn.execute(
-            f"UPDATE google_accounts SET {', '.join(sets)} WHERE user_id = %s",
+            f"UPDATE google_accounts SET {', '.join(sets)} "
+            f"WHERE user_id=%s AND COALESCE(site_id,%s::uuid)=COALESCE(%s::uuid,%s::uuid)",
             tuple(vals),
         )
 
 
-def delete_google_account(user_id: str):
+def delete_google_account(user_id: str, site_id: str = None):
+    """Disconnect Google for this user/site. site_id=None removes the user-level one."""
+    sid = site_id or None
     with _pool.connection() as conn:
-        conn.execute("DELETE FROM google_accounts WHERE user_id = %s", (user_id,))
+        if sid:
+            conn.execute("DELETE FROM google_accounts WHERE user_id=%s AND site_id=%s",
+                         (user_id, sid))
+        else:
+            conn.execute("DELETE FROM google_accounts WHERE user_id=%s AND site_id IS NULL",
+                         (user_id,))
+
+
+def list_google_accounts(user_id: str):
+    """List all Google connections for a user, with which site (if any) each is for."""
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            """SELECT g.site_id, g.google_email, g.ga_property_id, g.sc_site, s.site_url
+               FROM google_accounts g
+               LEFT JOIN wordpress_sites s ON s.id = g.site_id
+               WHERE g.user_id = %s ORDER BY g.connected_at DESC""",
+            (user_id,),
+        ).fetchall()
+    return [{"site_id": str(r[0]) if r[0] else None, "google_email": r[1],
+             "ga_property_id": r[2], "sc_site": r[3],
+             "site_url": r[4] or "(account default)"} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Contact-form leads
+# ---------------------------------------------------------------------------
+def save_contact_message(name: str, email: str, message: str, service: str = "", meta: str = ""):
+    """Store a contact/quote query from the public /contact form. Returns the id."""
+    with _pool.connection() as conn:
+        row = conn.execute(
+            """INSERT INTO contact_messages (name, email, service, message, meta)
+               VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+            (name[:200], email[:200], service[:80], message[:5000], meta[:400]),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def admin_list_contacts(limit: int = 100, status: str = ""):
+    """List contact leads (newest first). Optional status filter."""
+    with _pool.connection() as conn:
+        if status:
+            rows = conn.execute(
+                """SELECT id, name, email, service, message, status, created_at
+                   FROM contact_messages WHERE status = %s
+                   ORDER BY created_at DESC LIMIT %s""",
+                (status, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, name, email, service, message, status, created_at
+                   FROM contact_messages ORDER BY created_at DESC LIMIT %s""",
+                (limit,),
+            ).fetchall()
+    return [
+        {"id": r[0], "name": r[1], "email": r[2], "service": r[3],
+         "message": r[4], "status": r[5], "created_at": str(r[6])}
+        for r in rows
+    ]
+
+
+def admin_contact_counts():
+    """Return {'new': N, 'total': M} for the admin badge."""
+    with _pool.connection() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM contact_messages").fetchone()[0]
+        new = conn.execute("SELECT COUNT(*) FROM contact_messages WHERE status='new'").fetchone()[0]
+    return {"new": int(new), "total": int(total)}
+
+
+def admin_set_contact_status(msg_id: int, status: str):
+    if status not in ("new", "read", "archived"):
+        return
+    with _pool.connection() as conn:
+        conn.execute("UPDATE contact_messages SET status=%s WHERE id=%s", (status, msg_id))
 
 
 # ---------------------------------------------------------------------------
@@ -1119,19 +1307,84 @@ def delete_conversation(user_id: str, conv_id: str) -> bool:
 # ---------------------------------------------------------------------------
 # Billing: plan changes, top-ups, transactions, subscriptions
 # ---------------------------------------------------------------------------
-def set_plan(user_id: str, plan: str):
-    """Switch a user's plan and grant that plan's monthly allowances immediately."""
+def set_plan(user_id: str, plan: str, valid_days: int = 0):
+    """Switch a user's plan and grant that plan's monthly allowances immediately.
+
+    `valid_days` (when > 0) stamps `sub_renews_at` = now + valid_days. This is the
+    EXPIRY for a one-time (non-recurring) purchase: `downgrade_expired_plans()` runs
+    daily and drops any paid user past this date back to 'free'. Without it a one-time
+    Razorpay payment would grant the plan forever. valid_days=0 leaves the existing
+    renewal date untouched (used for 'free' downgrades)."""
     imgs = PLAN_CREDITS.get(plan, 5)
     toks = PLAN_TOKENS.get(plan, PLAN_TOKENS["free"])
     calls = PLAN_TOOLCALLS.get(plan, 100)
     with _pool.connection() as conn:
         this_month = conn.execute("SELECT to_char(now(),'YYYY-MM')").fetchone()[0]
-        conn.execute(
-            "UPDATE users SET plan=%s, credits=%s, credits_month=%s, "
-            "ai_tokens=%s, ai_tokens_month=%s, tool_calls=%s, tool_calls_month=%s "
-            "WHERE id=%s",
-            (plan, imgs, this_month, toks, this_month, calls, this_month, user_id),
-        )
+        if valid_days and valid_days > 0:
+            conn.execute(
+                "UPDATE users SET plan=%s, credits=%s, credits_month=%s, "
+                "ai_tokens=%s, ai_tokens_month=%s, tool_calls=%s, tool_calls_month=%s, "
+                "sub_renews_at = now() + make_interval(days => %s), renew_notified='' "
+                "WHERE id=%s",
+                (plan, imgs, this_month, toks, this_month, calls, this_month,
+                 int(valid_days), user_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET plan=%s, credits=%s, credits_month=%s, "
+                "ai_tokens=%s, ai_tokens_month=%s, tool_calls=%s, tool_calls_month=%s "
+                "WHERE id=%s",
+                (plan, imgs, this_month, toks, this_month, calls, this_month, user_id),
+            )
+
+
+def downgrade_expired_plans():
+    """Daily job: drop any paid, ACTIVE, non-recurring plan whose `sub_renews_at` has
+    passed back to 'free'. This is what makes a one-time Razorpay purchase last exactly
+    one billing period instead of forever. Returns the number of users downgraded.
+
+    Safe to run repeatedly (idempotent): only touches rows still on a paid plan with an
+    expiry in the past. Owner/unlimited and 'free' users are never affected."""
+    fresh = PLAN_CREDITS.get("free", 5)
+    toks = PLAN_TOKENS.get("free", PLAN_TOKENS["free"])
+    calls = PLAN_TOOLCALLS.get("free", 100)
+    with _pool.connection() as conn:
+        this_month = conn.execute("SELECT to_char(now(),'YYYY-MM')").fetchone()[0]
+        rows = conn.execute(
+            "UPDATE users SET plan='free', credits=LEAST(credits,%s), credits_month=%s, "
+            "  ai_tokens=LEAST(ai_tokens,%s), ai_tokens_month=%s, "
+            "  tool_calls=LEAST(tool_calls,%s), tool_calls_month=%s, "
+            "  sub_status='expired' "
+            "WHERE plan <> 'free' AND plan <> 'unlimited' "
+            "  AND sub_status IN ('active','canceled') AND sub_renews_at IS NOT NULL "
+            "  AND sub_renews_at < now() "
+            "RETURNING id",
+            (fresh, this_month, toks, this_month, calls, this_month),
+        ).fetchall()
+    return len(rows)
+
+
+def cancel_subscription(user_id: str, at_period_end: bool = True):
+    """User-initiated cancel. We DON'T yank the plan immediately (they paid for the
+    period): we mark sub_status='canceled' so no renewal happens and the daily
+    `downgrade_expired_plans` job drops them to free once `sub_renews_at` passes. If
+    there's no expiry recorded (shouldn't happen for paid), downgrade right away.
+    Returns the effective end date string (or '' if downgraded now)."""
+    with _pool.connection() as conn:
+        row = conn.execute(
+            "SELECT plan, sub_renews_at FROM users WHERE id=%s", (user_id,)).fetchone()
+        if not row or row[0] in ("free", "unlimited"):
+            return ""
+        renews_at = row[1]
+        if at_period_end and renews_at:
+            conn.execute(
+                "UPDATE users SET sub_status='canceled' WHERE id=%s", (user_id,))
+            return str(renews_at)[:10]
+    # No period end on record -> downgrade immediately.
+    set_plan(user_id, "free")
+    with _pool.connection() as conn:
+        conn.execute("UPDATE users SET sub_status='canceled' WHERE id=%s", (user_id,))
+    return ""
 
 
 def add_credits(user_id: str, count: int):

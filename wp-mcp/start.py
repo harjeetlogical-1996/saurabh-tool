@@ -18,6 +18,7 @@ MCP route: /mcp  (Bearer access token -> tid -> tenant credentials)
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import hmac
@@ -83,6 +84,11 @@ MAINTENANCE_ON = os.environ.get("MAINTENANCE", "").lower() in ("on", "1", "true"
 # Built-in AI chat is HIDDEN for launch - we sell only the connect-your-own-AI
 # plans for now. Code is kept intact; set ENABLE_BUILTIN_CHAT=on to bring it back.
 BUILTIN_CHAT_ON = os.environ.get("ENABLE_BUILTIN_CHAT", "").lower() in ("on", "1", "true", "yes")
+# Email-verification gate (A1). Default ON: unverified users are held at /verify-sent.
+# The gate must NOT silently disable itself just because the Resend key is missing/broken -
+# that would let everyone in unverified. Set REQUIRE_EMAIL_VERIFY=0 ONLY to intentionally
+# turn verification off (e.g. a deploy with no mail provider by design).
+REQUIRE_EMAIL_VERIFY = os.environ.get("REQUIRE_EMAIL_VERIFY", "1").lower() not in ("0", "off", "false", "no")
 # Maintenance-mode bypass key. If not explicitly set, use a random per-boot value so it
 # can never be guessed (the operator sets MAINTENANCE_KEY when they need a stable bypass).
 MAINT_KEY = os.environ.get("MAINTENANCE_KEY") or base64.urlsafe_b64encode(os.urandom(12)).decode().rstrip("=")
@@ -99,6 +105,11 @@ MAINT_KEY = os.environ.get("MAINTENANCE_KEY") or base64.urlsafe_b64encode(os.ura
 PUBLIC_PAGES = [
     ("/",             "weekly",  "1.0", "Home",         "What wptaskify is and how it connects WordPress to AI."),
     ("/features",     "weekly",  "0.9", "Features",     "100+ WordPress tools the AI can use."),
+    ("/services",     "weekly",  "0.9", "AI Development Services", "Custom AI tools, integrations, apps and content - built for you."),
+    ("/services/custom-ai-tools",     "monthly", "0.7", "Custom AI Tool & Plugin Development", "We build custom AI tools and WordPress plugins to your spec."),
+    ("/services/wordpress-ai-setup",  "monthly", "0.7", "AI Integration Services",      "Add AI to your existing site, data and workflows."),
+    ("/services/ai-content-writing",  "monthly", "0.7", "AI Apps & AI Content",         "AI web apps built from scratch, plus done-for-you AI content."),
+    ("/services/ai-seo-optimization", "monthly", "0.7", "AI SEO Services",              "Rank on Google and get cited by AI search engines."),
     ("/pricing",      "weekly",  "0.9", "Pricing",      "Free to start; Starter $20/mo, Pro $99/mo."),
     ("/tools",        "weekly",  "0.8", "Tools",        "The full list of WordPress tools driven by Claude or ChatGPT."),
     ("/how-it-works", "weekly",  "0.8", "How it works", "2-minute setup - connect, link your AI, ask."),
@@ -321,6 +332,27 @@ if MULTI_TENANT:
 
     db.set_low_balance_emailer(_low_balance_email)
 
+    # --- Daily maintenance: expire one-time (non-recurring) paid plans ---
+    # A background daemon thread that downgrades paid users past their sub_renews_at
+    # back to 'free'. Without this a one-time Razorpay purchase would grant the plan
+    # forever (B1). Runs at boot, then every 6h. Single-instance safe; the UPDATE is
+    # idempotent so even multiple instances can't double-downgrade.
+    import threading as _threading
+
+    def _expiry_worker():
+        import time as _t
+        while True:
+            try:
+                n = db.downgrade_expired_plans()
+                if n:
+                    print(f"[expiry] downgraded {n} expired plan(s) to free")
+            except Exception as e:  # noqa: BLE001
+                print(f"[expiry] downgrade job failed: {e}")
+            _t.sleep(6 * 60 * 60)
+
+    _threading.Thread(target=_expiry_worker, daemon=True, name="plan-expiry").start()
+    print("[start] plan-expiry worker started.")
+
 app = server.mcp.streamable_http_app()
 _inner = app
 _PORT_BYTES = str(int(os.environ["PORT"])).encode()
@@ -433,6 +465,60 @@ def _csrf_ok(headers: dict, form: dict) -> bool:
     return bool(supplied) and hmac.compare_digest(supplied, _csrf_token(uid))
 
 
+# --- In-memory IP rate limiter for unauthenticated auth endpoints (A3) ---
+# A sliding-window counter keyed by (bucket, ip). Good enough for a single Railway
+# instance; it throttles password-guessing, signup spam and email-bombing without a
+# datastore. Not shared across instances - acceptable for these low-QPS endpoints.
+_rl_hits = {}   # (bucket, ip) -> [timestamps]
+
+
+def _client_ip(headers) -> str:
+    fwd = headers.get(b"x-forwarded-for", b"").decode()
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return ""
+
+
+def _rate_limited(bucket: str, ip: str, limit: int, window: int) -> bool:
+    """Return True if (bucket, ip) has already hit `limit` requests in the last `window`
+    seconds. Records this attempt. Empty IP is never limited (can't attribute it)."""
+    if not ip:
+        return False
+    now = time.time()
+    key = (bucket, ip)
+    hits = [t for t in _rl_hits.get(key, []) if now - t < window]
+    # Opportunistic cleanup so the dict can't grow unbounded.
+    if len(_rl_hits) > 5000:
+        for k in [k for k, v in list(_rl_hits.items()) if not any(now - t < 3600 for t in v)]:
+            _rl_hits.pop(k, None)
+    if len(hits) >= limit:
+        _rl_hits[key] = hits
+        return True
+    hits.append(now)
+    _rl_hits[key] = hits
+    return False
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _valid_email(email: str) -> bool:
+    email = (email or "").strip()
+    return bool(email) and len(email) <= 254 and bool(_EMAIL_RE.match(email))
+
+
+def _password_error(pw: str):
+    """Server-side password policy (A2). The browser's minlength=6 is advisory only - a
+    direct POST bypasses it - so signup and reset must re-check here. Returns an error
+    string, or '' if the password is acceptable."""
+    pw = pw or ""
+    if len(pw) < 8:
+        return "Password must be at least 8 characters."
+    if len(pw) > 200:
+        return "Password is too long (max 200 characters)."
+    return ""
+
+
 def _safe_id(s) -> int:
     """Parse a user-supplied numeric id, returning 0 if it's not a plain in-range integer.
     Bounds to a Postgres bigint so a giant number can't overflow the DB and cause a 500."""
@@ -537,9 +623,15 @@ def _handle_stripe_event(event):
         kind = md.get("kind", "")
         item = md.get("item", "")
         if kind == "plan":
-            db.set_plan(uid, item)
             if md.get("recurring") == "1" and obj.get("subscription"):
+                # Recurring: Stripe manages renewal; no local expiry (subscription.deleted
+                # downgrades). No valid_days so the plan persists until Stripe says otherwise.
+                db.set_plan(uid, item)
                 db.set_subscription(uid, "stripe", obj["subscription"], "active")
+            else:
+                # One-time Stripe payment: expire in ~1 month like the Razorpay path (B1).
+                db.set_plan(uid, item, valid_days=31)
+                db.set_subscription(uid, "stripe", item, "active")
             _, usd = billing_mod.PLAN_PRICES.get(item, ("", 0))
             db.record_transaction(uid, "stripe", "plan", item, usd, obj.get("id", ""))
         elif kind == "credit_pack":
@@ -616,8 +708,6 @@ def _handle_razorpay_event(event):
             pass
 
     if kind == "plan":
-        db.set_plan(uid, item)
-        db.set_subscription(uid, "razorpay", item, "active")
         table = rzp_mod.PLAN_PRICES_INR if currency == "INR" else rzp_mod.PLAN_PRICES_USD
         label, list_amt = table.get(item, (item, 0))
         try:
@@ -629,6 +719,24 @@ def _handle_razorpay_event(event):
         except (TypeError, ValueError):
             tax = 0
         total = base + tax
+        # B2 - RECONCILE: verify the money Razorpay actually captured matches the price we
+        # intended to charge for this plan+coupon+currency (from `notes`). The signature is
+        # already verified, so notes aren't forged; this guards against a payment-link amount
+        # that doesn't line up with what we recorded (e.g. tampering, partial capture, or a
+        # notes/currency mismatch). If it doesn't reconcile, DON'T grant - log and bail.
+        paid_amt, paid_cur = rzp_mod.extract_amount(event)
+        if paid_amt is not None:
+            expected = max(total, 1.0)  # create_plan_link floors a 0 total to 1 unit
+            # Allow 1 unit of rounding slack; currency (if reported) must match.
+            amount_ok = abs(paid_amt - expected) <= 1.01
+            cur_ok = (not paid_cur) or (paid_cur == currency)
+            if not (amount_ok and cur_ok):
+                print(f"[webhook] AMOUNT MISMATCH uid={uid} item={item}: "
+                      f"paid={paid_amt} {paid_cur} expected={expected} {currency} - NOT granting")
+                return
+        # One-time purchase -> plan valid for ~1 month, then downgrade_expired_plans() drops it.
+        db.set_plan(uid, item, valid_days=31)
+        db.set_subscription(uid, "razorpay", item, "active")
         gstin = notes.get("gstin", "")
         # Allocate a proper invoice number for every paid plan (GST invoice for INR).
         try:
@@ -889,6 +997,16 @@ async def _handle_admin(path, method, headers, query, receive, send):
         await redirect("/users")
         return
 
+    # ----- POST: mark a contact lead read/archived -----
+    if method == "POST" and sub == "leads/status":
+        f = _form(await _read_body(receive))
+        try:
+            db.admin_set_contact_status(int(f.get("id", "0") or 0), f.get("status", ""))
+        except Exception:
+            pass
+        await redirect("/leads")
+        return
+
     # ----- POST: create a coupon -----
     if method == "POST" and sub == "coupons/create":
         f = _form(await _read_body(receive))
@@ -1097,6 +1215,9 @@ async def _handle_admin(path, method, headers, query, receive, send):
             search=qs.get("q", [""])[0], plan=qs.get("plan", [""])[0],
             verified=qs.get("verified", [""])[0], paid=qs.get("paid", [""])[0],
             sort=qs.get("sort", ["created_at"])[0]))
+    elif sub == "leads":
+        await html(200, admin_mod.leads_page(
+            flash=qs.get("ok", [""])[0], status=qs.get("status", [""])[0]))
     elif parts and parts[0] == "user" and len(parts) == 2:
         await html(200, admin_mod.user_detail_page(parts[1]))
     elif sub == "payments":
@@ -1235,6 +1356,39 @@ def _geo_country(headers):
     return country
 
 
+def _billing_country(headers):
+    """Country for the ACTUAL CHARGE + GST decision. Unlike `_geo_country`, this
+    IGNORES the user-set `cur` cookie - otherwise an Indian buyer could set cur=US and
+    pay in USD with zero GST (B3). Billing currency must come from a trusted signal:
+    a CDN/proxy geo header, else IP geolocation. Display pricing can still use the
+    cookie via `_geo_country`; money cannot."""
+    for h in (b"cf-ipcountry", b"x-vercel-ip-country", b"x-country-code"):
+        v = headers.get(h, b"").decode().strip().upper()
+        if v and len(v) == 2:
+            return v
+    fwd = headers.get(b"x-forwarded-for", b"").decode()
+    ip = fwd.split(",")[0].strip() if fwd else ""
+    if not ip:
+        return ""
+    if ip in _geo_cache:
+        return _geo_cache[ip]
+    country = ""
+    try:
+        with urllib.request.urlopen(f"https://ipapi.co/{ip}/country/", timeout=3) as r:
+            country = r.read().decode().strip().upper()[:2]
+    except Exception:
+        country = ""
+    _geo_cache[ip] = country
+    return country
+
+
+def _billing_currency(headers):
+    """INR for India, USD for everyone else - based on TRUSTED geo only (see
+    `_billing_country`). Used by /checkout and /coupon-preview so the amount charged and
+    the GST applied can't be flipped by a spoofable cookie."""
+    return "INR" if _billing_country(headers) == "IN" else "USD"
+
+
 def _studio_fetch(uid, wpps_path):
     """Fetch a wptaskify Studio REST endpoint (wpps/v1/...) for the user's primary
     site, using its stored credentials. Returns (ok, data). Used by the dashboard
@@ -1343,6 +1497,22 @@ async def asgi_app(scope, receive, send):
         if path == "/how-it-works" and method == "GET":
             await _send_html(send, 200, pages.how_page())
             return
+        # Done-for-you services (agency offering) - hub + 4 service pages.
+        if path == "/services" and method == "GET":
+            await _send_html(send, 200, pages.services_page())
+            return
+        if path == "/services/wordpress-ai-setup" and method == "GET":
+            await _send_html(send, 200, pages.service_setup_page())
+            return
+        if path == "/services/custom-ai-tools" and method == "GET":
+            await _send_html(send, 200, pages.service_custom_tools_page())
+            return
+        if path == "/services/ai-content-writing" and method == "GET":
+            await _send_html(send, 200, pages.service_content_page())
+            return
+        if path == "/services/ai-seo-optimization" and method == "GET":
+            await _send_html(send, 200, pages.service_seo_page())
+            return
         if path == "/pricing" and method == "GET":
             await _send_html(send, 200, pages.pricing_page(country=_geo_country(headers)))
             return
@@ -1413,7 +1583,41 @@ async def asgi_app(scope, receive, send):
             await _send_html(send, 200, pages.about_page())
             return
         if path == "/contact" and method == "GET":
-            await _send_html(send, 200, pages.contact_page())
+            _qs = urllib.parse.parse_qs(query)
+            _svc = (_qs.get("service") or [""])[0]
+            _svc = _svc if _svc in ("wordpress-ai-setup", "custom-ai-tools",
+                                    "ai-content-writing", "ai-seo-optimization") else ""
+            _sent = "sent" in _qs
+            await _send_html(send, 200, pages.contact_page(service=_svc, sent=_sent))
+            return
+        if path == "/contact" and method == "POST":
+            f = _form(await _read_body(receive))
+            name = (f.get("name", "") or "").strip()[:200]
+            email = (f.get("email", "") or "").strip()[:200]
+            msg = (f.get("message", "") or "").strip()[:5000]
+            svc = (f.get("service", "") or "").strip()[:80]
+            if not name or not email or not msg or "@" not in email:
+                await _send_html(send, 200, pages.contact_page(
+                    service=svc, error="Please fill in your name, a valid email, and a message."))
+                return
+            # Basic metadata for the admin (IP + short UA), no PII beyond the form.
+            ua = headers.get(b"user-agent", b"").decode("utf-8", "ignore")[:200]
+            ip = (headers.get(b"x-forwarded-for", b"").decode().split(",")[0].strip()
+                  or headers.get(b"x-real-ip", b"").decode())[:60]
+            meta = f"ip={ip}; ua={ua}"
+            try:
+                mid = db.save_contact_message(name, email, msg, service=svc, meta=meta)
+                # Notify the owner by email (best-effort; no-op if email disabled).
+                try:
+                    email_mod.send_contact_notice(name, email, svc, msg, mid)
+                except Exception as _e:  # noqa: BLE001
+                    print("[contact] notify failed:", _e)
+            except Exception as e:  # noqa: BLE001
+                print("[contact] save failed:", e)
+                await _send_html(send, 200, pages.contact_page(
+                    service=svc, error="Something went wrong sending your message. Please email hello@wptaskify.com."))
+                return
+            await _send_html(send, 303, "", [(b"location", b"/contact?sent=1")])
             return
         if path == "/blog" and method == "GET":
             try:
@@ -1554,7 +1758,7 @@ async def asgi_app(scope, receive, send):
             if not uid:
                 await _send_html(send, 302, "", [(b"location", b"/login")])
                 return
-            if email_mod.enabled() and not db.is_verified(uid):
+            if REQUIRE_EMAIL_VERIFY and not db.is_verified(uid):
                 await _send_html(send, 302, "", [(b"location", b"/verify-sent")])
                 return
             sites = db.list_user_sites(uid)
@@ -1665,8 +1869,12 @@ async def asgi_app(scope, receive, send):
                 await _send_html(send, 302, "", [(b"location",
                     b"/dashboard?err=Google+is+not+configured+yet")])
                 return
-            # state = signed "google|uid" so the callback can verify it's really this user.
-            state = _sign("google|" + uid)
+            # Optional ?site=<site_id> - connect a DIFFERENT Google account for that
+            # specific site (each site's Search Console can live on its own Gmail).
+            _gsite = (urllib.parse.parse_qs(query).get("site") or [""])[0]
+            _gsite = _safe_uuid(_gsite) if _gsite else ""
+            # state = signed "google|uid|site_id" so the callback binds to this user+site.
+            state = _sign("google|" + uid + "|" + _gsite)
             await _send_html(send, 302, "", [(b"location", google_api.auth_url(state).encode())])
             return
 
@@ -1680,7 +1888,9 @@ async def asgi_app(scope, receive, send):
                 await _send_html(send, 302, "", [(b"location",
                     b"/dashboard?err=Google+connection+was+cancelled")])
                 return
-            uid = payload.split("|", 1)[1]
+            _parts = payload.split("|")
+            uid = _parts[1] if len(_parts) > 1 else ""
+            gsite = _parts[2] if len(_parts) > 2 and _parts[2] else None
             # The logged-in user must match the state's user (defence in depth).
             cur = _get_active_uid(headers)
             if not cur or cur != uid:
@@ -1689,12 +1899,26 @@ async def asgi_app(scope, receive, send):
             try:
                 tok = google_api.exchange_code(code)
                 if not tok.get("refresh_token"):
-                    # Google only returns a refresh token with prompt=consent+offline;
-                    # if missing, ask them to reconnect (revoke old grant).
                     await _send_html(send, 302, "", [(b"location",
                         b"/dashboard?err=Google+did+not+return+a+refresh+token%2C+try+again")])
                     return
-                db.save_google_account(uid, tok["refresh_token"], tok.get("email", ""))
+                db.save_google_account(uid, tok["refresh_token"], tok.get("email", ""),
+                                       site_id=gsite)
+                # AUTO-SELECT so the user doesn't have to pick anything: if the
+                # account has exactly one GA4 property and/or one Search Console site,
+                # select it automatically. (If several, they pick from the dropdown.)
+                try:
+                    _at = google_api.access_token(tok["refresh_token"])
+                    if _at:
+                        _props, _ = google_api.list_ga_properties(_at)
+                        _scs, _ = google_api.list_sc_sites(_at)
+                        _p = _props[0]["property_id"] if len(_props) == 1 else None
+                        _s = _scs[0]["site"] if len(_scs) == 1 else None
+                        if _p or _s:
+                            db.set_google_selection(uid, ga_property_id=_p, sc_site=_s,
+                                                    site_id=gsite)
+                except Exception as _e:  # noqa: BLE001
+                    print("[google] auto-select skipped:", _e)
             except Exception as e:  # noqa: BLE001
                 print("[google] callback error:", e)
                 await _send_html(send, 302, "", [(b"location",
@@ -1713,7 +1937,8 @@ async def asgi_app(scope, receive, send):
             if not _csrf_ok(headers, f):
                 await _send_html(send, 403, "Bad CSRF token")
                 return
-            db.delete_google_account(uid)
+            _gsite = _safe_uuid(f.get("site_id", "")) or None
+            db.delete_google_account(uid, site_id=_gsite)
             await _send_html(send, 302, "", [(b"location", b"/dashboard?ok=Google+disconnected")])
             return
 
@@ -1728,22 +1953,40 @@ async def asgi_app(scope, receive, send):
                 return
             prop = (f.get("ga_property_id") or "").strip()
             site = (f.get("sc_site") or "").strip()
+            _gsite = _safe_uuid(f.get("site_id", "")) or None
             db.set_google_selection(uid,
                                     ga_property_id=prop if prop else None,
-                                    sc_site=site if site else None)
+                                    sc_site=site if site else None,
+                                    site_id=_gsite)
             await _send_html(send, 302, "", [(b"location", b"/dashboard?ok=Analytics+settings+saved")])
             return
 
         if path == "/signup" and method == "POST":
             f = _form(await _read_body(receive))
             nxt = f.get("next", "")
+            # A3 - throttle automated account creation (each grants free credits).
+            if _rate_limited("signup", _client_ip(headers), limit=8, window=3600):
+                await _send_html(send, 429, pages.signup_page(
+                    error="Too many sign-ups from your network. Please try again later.",
+                    authorize_next=nxt))
+                return
             email_addr = f.get("email", "")
             # A plan intent may ride in via next=/checkout-after?plan=<key>.
             buy_plan = ""
             if "checkout-after" in nxt and "plan=" in nxt:
                 buy_plan = urllib.parse.parse_qs(nxt.split("?", 1)[-1]).get("plan", [""])[0]
+            # A2 - server-side validation (browser attributes are bypassable via direct POST).
+            pw = f.get("password", "")
+            if not _valid_email(email_addr):
+                await _send_html(send, 400, pages.signup_page(
+                    error="Please enter a valid email address.", authorize_next=nxt))
+                return
+            pw_err = _password_error(pw)
+            if pw_err:
+                await _send_html(send, 400, pages.signup_page(error=pw_err, authorize_next=nxt))
+                return
             try:
-                uid = db.create_user(email_addr, f.get("password", ""))
+                uid = db.create_user(email_addr, pw)
             except Exception as e:
                 msg = "This email is already registered." if "unique" in str(e).lower() else f"Signup failed: {e}"
                 await _send_html(send, 400, pages.signup_page(error=msg, authorize_next=nxt))
@@ -1771,6 +2014,13 @@ async def asgi_app(scope, receive, send):
         if path == "/login" and method == "POST":
             f = _form(await _read_body(receive))
             nxt = f.get("next", "")
+            # A3 - throttle online password guessing. 10 attempts / 5 min / IP is far above
+            # any human's typo rate but kills brute-force. argon2 already makes each try slow.
+            if _rate_limited("login", _client_ip(headers), limit=10, window=300):
+                await _send_html(send, 429, pages.login_page(
+                    error="Too many login attempts. Please wait a few minutes and try again.",
+                    authorize_next=nxt))
+                return
             uid = db.authenticate_user(f.get("email", ""), f.get("password", ""))
             if not uid:
                 await _send_html(send, 401,
@@ -1803,11 +2053,22 @@ async def asgi_app(scope, receive, send):
         if path == "/verify-sent" and method == "GET":
             uid = _get_active_uid(headers)
             email_addr = db.get_email(uid) if uid else ""
-            resent = "resent" in urllib.parse.parse_qs(query)
-            await _send_html(send, 200, pages.verify_sent_page(email_addr, resent))
+            _q = urllib.parse.parse_qs(query)
+            resent = "resent" in _q
+            toofast = "toofast" in _q
+            await _send_html(send, 200, pages.verify_sent_page(email_addr, resent, toofast))
             return
         if path == "/verify-resend" and method == "POST":
             uid = _get_active_uid(headers)
+            # A3 - a verification email only ever goes to the logged-in user's OWN address
+            # (needs a valid session), so this can't be used to bomb a stranger. But cap it
+            # so a user can't spam themselves / burn our Resend quota: 5 per 15 min, by uid
+            # and by IP.
+            ip = _client_ip(headers)
+            if _rate_limited(f"vresend:{uid}", ip or (uid or "?"), limit=5, window=900) or \
+               _rate_limited("vresend-ip", ip, limit=20, window=900):
+                await _send_html(send, 302, "", [(b"location", b"/verify-sent?toofast=1")])
+                return
             if uid:
                 _send_verify_email(uid, db.get_email(uid))
             await _send_html(send, 302, "", [(b"location", b"/verify-sent?resent=1")])
@@ -1848,7 +2109,7 @@ async def asgi_app(scope, receive, send):
             if plan not in ("owai_mini", "owai_starter", "owai_pro"):
                 await _send_html(send, 302, "", [(b"location", b"/dashboard")])
                 return
-            currency = "INR" if _geo_country(headers) == "IN" else "USD"
+            currency = _billing_currency(headers)
             # Guard: some plans aren't sold in every currency (e.g. Mini is India/INR only).
             # Don't render a broken "$0 / Pay $0" page - send them to pricing instead.
             if not rzp_mod.plan_supported(plan, currency):
@@ -1867,11 +2128,21 @@ async def asgi_app(scope, receive, send):
             return
         if path == "/forgot" and method == "POST":
             f = _form(await _read_body(receive))
-            u = db.get_user_by_email(f.get("email", ""))
-            if u:
-                tok = db.create_token(u["id"], "reset", hours=1)
-                link = f"{PUBLIC_URL}/reset?token={tok}"
-                email_mod.send_reset(u["email"], link)
+            target = (f.get("email", "") or "").strip().lower()
+            # A3 - reset emails can be sent to ANY address (no session), so this is the main
+            # email-bomb + enumeration vector. Throttle by IP and by target address. When
+            # limited we skip sending but STILL show the identical success page, so an
+            # attacker can't tell rate-limited from sent (keeps enumeration-safe).
+            ip = _client_ip(headers)
+            limited = (_rate_limited("forgot-ip", ip, limit=15, window=3600)
+                       or (target and _rate_limited("forgot-to", target,
+                                                     limit=4, window=3600)))
+            if not limited:
+                u = db.get_user_by_email(f.get("email", ""))
+                if u:
+                    tok = db.create_token(u["id"], "reset", hours=1)
+                    link = f"{PUBLIC_URL}/reset?token={tok}"
+                    email_mod.send_reset(u["email"], link)
             # Always show success (don't leak which emails exist).
             await _send_html(send, 200, pages.message_page(
                 "Check your email", "<p class=sub>If that email is registered, we've sent a "
@@ -1884,13 +2155,20 @@ async def asgi_app(scope, receive, send):
         if path == "/reset" and method == "POST":
             f = _form(await _read_body(receive))
             tok = f.get("token", "")
+            pw = f.get("password", "")
+            # A2 - validate the new password BEFORE consuming the (single-use) token, so a
+            # weak password doesn't burn the reset link and force the user to start over.
+            pw_err = _password_error(pw)
+            if pw_err:
+                await _send_html(send, 400, pages.reset_page(tok, error=pw_err))
+                return
             vid = db.consume_token(tok, "reset") if tok else None
             if not vid:
                 await _send_html(send, 400, pages.message_page(
                     "Link expired", "<p class=sub>This reset link is invalid or expired.</p>",
                     "/forgot", "Request a new one"))
                 return
-            db.set_password(vid, f.get("password", ""))
+            db.set_password(vid, pw)
             db.mark_verified(vid)  # resetting via email also proves ownership
             cookie = f"sid={_sign_session(vid)}; Path=/; HttpOnly; Secure; SameSite=Lax"
             await _send_html(send, 302, "", [(b"set-cookie", cookie.encode()),
@@ -1902,7 +2180,7 @@ async def asgi_app(scope, receive, send):
                 await _send_html(send, 302, "", [(b"location", b"/login")])
                 return
             # Verify-required gate: unverified users go to the "check email" page.
-            if email_mod.enabled() and not db.is_verified(uid):
+            if REQUIRE_EMAIL_VERIFY and not db.is_verified(uid):
                 await _send_html(send, 302, "", [(b"location", b"/verify-sent")])
                 return
             sites = db.list_user_sites(uid)
@@ -1941,13 +2219,34 @@ async def asgi_app(scope, receive, send):
                 "country": _country,
             }
             google_acct = db.get_google_account(uid)
+            google_all = db.list_google_accounts(uid)
+            # For each connected Google account, fetch its GA4 properties + Search
+            # Console sites so the dashboard can show a DROPDOWN (no manual typing) and
+            # a list of what's available. Keyed by site_id ("" = account default).
+            google_opts = {}
+            for _acc in google_all:
+                _key = _acc.get("site_id") or ""
+                try:
+                    _rt = db.get_google_refresh_token(uid, site_id=_acc.get("site_id"))
+                    if not _rt:
+                        continue
+                    _at = google_api.access_token(_rt)
+                    if not _at:
+                        continue
+                    _props, _pe = google_api.list_ga_properties(_at)
+                    _scs, _se = google_api.list_sc_sites(_at)
+                    google_opts[_key] = {"properties": _props, "sites": _scs,
+                                         "error": _pe or _se or ""}
+                except Exception as _e:  # noqa: BLE001
+                    google_opts[_key] = {"properties": [], "sites": [], "error": str(_e)[:120]}
             await _send_html(send, 200, pages.dashboard(
                 sites, PUBLIC_URL, account, flash, ok, email=email_addr, verified=verified,
                 token_account=token_acct, toolcall_account=toolcall_acct,
                 chat_enabled=(BUILTIN_CHAT_ON and bool(chat_mod.ANTHROPIC_API_KEY)),
                 country=_country, txns=txns, usage=usage, profile=profile,
                 csrf=_csrf_token(uid), affiliate=affiliate,
-                google=google_acct, google_configured=google_api.configured()))
+                google=google_acct, google_configured=google_api.configured(),
+                google_all=google_all, google_opts=google_opts))
             return
         # ----- Affiliate: save payout method + request payout -----
         if path == "/affiliate/payout-method" and method == "POST":
@@ -2008,10 +2307,11 @@ async def asgi_app(scope, receive, send):
                 await _send_html(send, 302, "", _back(
                     "Email notifications turned on." if on else "Email notifications turned off."))
             elif act == "password":
+                _pwerr = _password_error(f.get("new", ""))
                 if not db.verify_user_password(uid, f.get("current", "")):
                     await _send_html(send, 302, "", _back("Current password is incorrect.", ok=False))
-                elif len(f.get("new", "")) < 6:
-                    await _send_html(send, 302, "", _back("New password must be at least 6 characters.", ok=False))
+                elif _pwerr:
+                    await _send_html(send, 302, "", _back(_pwerr, ok=False))
                 else:
                     db.set_password(uid, f.get("new", ""))
                     # set_password bumps session_ver (revoking OTHER sessions). Re-issue a
@@ -2055,22 +2355,24 @@ async def asgi_app(scope, receive, send):
             await _send_html(send, 302, "", [(b"location", b"/dashboard?keysaved=1")])
             return
 
-        # ----- Billing / payments (Stripe) -----
+        # ----- Billing / payments -----
+        # /billing is the Razorpay/Stripe post-payment callback target. We no longer render
+        # a separate billing page (it duplicated & diverged from the dashboard Plan panel -
+        # D2). Redirect to the single billing surface: the dashboard Plan tab, carrying the
+        # success/canceled flash so the user sees confirmation there.
         if path == "/billing" and method == "GET":
             uid = _get_active_uid(headers)
             if not uid:
                 await _send_html(send, 302, "", [(b"location", b"/login")])
                 return
-            summary = db.get_billing_summary(uid)
-            txns = db.list_transactions(uid)
             qs = urllib.parse.parse_qs(query)
-            flash = ""
             if "success" in qs:
-                flash = "Payment successful - your account is updated."
+                loc = b"/dashboard?ok=Payment+successful+-+your+account+is+updated#plan"
             elif "canceled" in qs:
-                flash = "Checkout canceled."
-            await _send_html(send, 200, pages.billing_page(
-                summary, txns, billing_enabled=billing_mod.enabled(), flash=flash))
+                loc = b"/dashboard?err=Checkout+canceled#plan"
+            else:
+                loc = b"/dashboard#plan"
+            await _send_html(send, 302, "", [(b"location", loc)])
             return
         if path == "/coupon-preview" and method == "GET":
             # Live coupon check for the review page: return the recalculated breakdown.
@@ -2081,7 +2383,7 @@ async def asgi_app(scope, receive, send):
             q = urllib.parse.parse_qs(query)
             plan = (q.get("plan") or [""])[0]
             code = ((q.get("code") or [""])[0] or "").strip().upper()
-            currency = "INR" if _geo_country(headers) == "IN" else "USD"
+            currency = _billing_currency(headers)
             if not rzp_mod.plan_supported(plan, currency):
                 await _send_json(send, 400, {"ok": False, "error": "Plan not available"})
                 return
@@ -2111,7 +2413,7 @@ async def asgi_app(scope, receive, send):
             coupon_code = (f.get("coupon", "") or "").strip().upper()
             email_addr = db.get_email(uid) or ""
             # Razorpay for everyone: India -> INR, international -> USD.
-            currency = "INR" if _geo_country(headers) == "IN" else "USD"
+            currency = _billing_currency(headers)
             try:
                 if not (rzp_mod.enabled() and rzp_mod.plan_supported(plan, currency)):
                     await _send_json(send, 503, {"error": "This plan isn't available for online purchase yet."})
@@ -2143,8 +2445,10 @@ async def asgi_app(scope, receive, send):
                             return
                     except Exception:
                         pass
-                    db.set_plan(uid, plan)
-                    db.set_subscription(uid, "razorpay", plan, "active")
+                    # B4 - a coupon free-grant is still a ONE-TIME grant: give it the same
+                    # ~1-month expiry so a leaked 100%-off code can't mint permanent free Pro.
+                    db.set_plan(uid, plan, valid_days=31)
+                    db.set_subscription(uid, "coupon", plan, "active")
                     try:
                         db.record_transaction(uid, "coupon", "plan", plan, 0, "",
                                               currency=currency, base_amount=0, tax_amount=0)
@@ -2179,7 +2483,7 @@ async def asgi_app(scope, receive, send):
             f = _form(await _read_body(receive))
             pack = f.get("pack", "")
             email_addr = db.get_email(uid) or ""
-            currency = "INR" if _geo_country(headers) == "IN" else "USD"
+            currency = _billing_currency(headers)
             try:
                 if rzp_mod.enabled() and rzp_mod.pack_supported(pack, currency):
                     url = rzp_mod.create_topup_link(uid, email_addr, pack, PUBLIC_URL, currency)
@@ -2190,6 +2494,35 @@ async def asgi_app(scope, receive, send):
                 await _send_json(send, 400, {"error": str(e)[:150]})
                 return
             await _send_html(send, 302, "", [(b"location", url.encode())])
+            return
+        if path == "/cancel-plan" and method == "POST":
+            # Self-service cancel/downgrade (D1). This is a state-changing account action,
+            # so it requires the CSRF token (unlike payment INITIATION above). We cancel at
+            # period end: the user keeps what they paid for until sub_renews_at, then the
+            # daily expiry job drops them to Free.
+            uid = _get_active_uid(headers)
+            if not uid:
+                await _send_html(send, 302, "", [(b"location", b"/login")])
+                return
+            f = _form(await _read_body(receive))
+            if not _csrf_ok(headers, f):
+                await _send_html(send, 302, "", [(b"location",
+                    b"/dashboard?err=Session+expired,+please+try+again#plan")])
+                return
+            try:
+                end = db.cancel_subscription(uid)
+                if end:
+                    msg = f"Plan canceled. You keep your plan until {end}, then move to Free."
+                else:
+                    msg = "Plan canceled. You are now on the Free plan."
+            except Exception as e:  # noqa: BLE001
+                print(f"[cancel-plan] uid={uid}: {e}")
+                await _send_html(send, 302, "", [(b"location",
+                    b"/dashboard?err=Could+not+cancel,+please+contact+support#plan")])
+                return
+            # Best-effort: let the referrer/owner know via email (non-blocking, ignore errors).
+            await _send_html(send, 302, "", [(b"location",
+                (f"/dashboard?ok={urllib.parse.quote(msg)}#plan").encode())])
             return
         if path == "/webhook/stripe" and method == "POST":
             raw = await _read_body(receive)
@@ -2673,9 +3006,15 @@ async def asgi_app(scope, receive, send):
                     if site:
                         # BYOK Gemini key (if set) overrides the platform key
                         own_key = db.get_user_gemini_key(tid) or ""
+                        _plan = ""
+                        try:
+                            _acct = db.get_account(tid)
+                            _plan = (_acct or {}).get("plan", "") or ""
+                        except Exception:
+                            _plan = ""
                         tenant_cfg = server.make_tenant_config(
                             site["site_url"], site["wp_username"], site["app_password"],
-                            gemini_api_key=own_key, user_id=tid,
+                            gemini_api_key=own_key, user_id=tid, plan=_plan,
                             credit_hook=(lambda uid=tid: db.try_consume_credit(uid)),
                             credit_refund_hook=(lambda uid=tid: db.refund_credit(uid, 1)),
                             toolcall_hook=(lambda uid=tid: db.try_consume_toolcall(uid)),
@@ -2685,7 +3024,14 @@ async def asgi_app(scope, receive, send):
                                            db.create_pending_action(uid, tool, args, summary, risk)),
                             approval_status_hook=(lambda aid, uid=tid:
                                                   (db.get_pending_action(uid, aid) or {"status": "unknown"})))
-                # tid present but no site -> tenant_cfg stays None -> fail closed below
+                    else:
+                        # Valid account but NO WordPress site connected yet. Don't 401
+                        # (that shows Claude a scary "Authorization failed" error and
+                        # the user thinks their credentials are wrong). Instead bind a
+                        # "no-site" context so the connection succeeds, and each tool
+                        # returns a clear "add your site first" message.
+                        tenant_cfg = {"no_site": True, "user_id": tid}
+                # tid missing (banned) -> tenant_cfg stays None -> fail closed below
             else:
                 # standalone: token valid -> use the default env site
                 tenant_cfg = server._DEFAULT_TENANT
