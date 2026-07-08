@@ -3032,7 +3032,7 @@ def how_page():
         keywords="how to connect wordpress to ai, connect wordpress to claude, connect wordpress to chatgpt, wptaskify setup")
 
 
-def pricing_page(country=""):
+def pricing_page(country="", show_welcome=True):
     is_india = (country or "").upper() == "IN"
     cur = "₹" if is_india else "$"
 
@@ -3059,7 +3059,8 @@ def pricing_page(country=""):
     _name2key = {"Free": "", "Mini": "owai_mini", "Starter": "owai_starter", "Pro": "owai_pro"}
     # First-month welcome discount (auto-applied at checkout for new customers). Mirror the
     # db.WELCOME_DISCOUNT table so the pricing page advertises the exact same offer.
-    _welcome = {"Starter": 30, "Pro": 40}
+    # show_welcome=False for affiliate-referred visitors (they get commission, not discount).
+    _welcome = {"Starter": 30, "Pro": 40} if show_welcome else {}
     cards = ""
     for i, (name, usd, inr, who, feats, feat, cta) in enumerate(plans):
         amt = inr if is_india else usd
@@ -3097,10 +3098,12 @@ def pricing_page(country=""):
     cols = "cols4" if len(plans) >= 4 else "cols3"
 
     # Plain-HTML declarative price sentence (AEO - always both currencies for machines).
+    _welcome_sentence = ("New customers get an automatic first-month discount: 30% off Starter "
+                         "and 40% off Pro (applied at checkout, first month only). "
+                         if show_welcome else "")
     aeo_prices = ("wptaskify pricing (2026): Free $0, Starter $20/month, Pro $99/month. "
                   "In India: Free ₹0, Mini ₹700, Starter ₹1,699, Pro ₹8,299 per month. "
-                  "New customers get an automatic first-month discount: 30% off Starter and "
-                  "40% off Pro (applied at checkout, first month only). "
+                  + _welcome_sentence +
                   "Every plan includes all 100+ WordPress tools; you bring your own Claude or "
                   "ChatGPT, so there is no extra AI subscription.")
 
@@ -3136,8 +3139,12 @@ def pricing_page(country=""):
     faqs = [
         ("How much does wptaskify cost?",
          f"Plans start free. Paid plans are Starter at {'₹1,699' if is_india else '$20'}/month and Pro at {'₹8,299' if is_india else '$99'}/month{', with an India-only Mini plan at ₹700/month' if is_india else ''}. Every plan includes all 100+ tools."),
-        ("Is there a discount for new customers?",
-         "Yes. New customers get an automatic first-month discount - 30% off Starter and 40% off Pro - applied at checkout, no code needed. It's a one-time welcome offer on your first month; the plan then renews at the normal monthly price."),
+    ]
+    if show_welcome:
+        faqs.append(
+            ("Is there a discount for new customers?",
+             "Yes. New customers get an automatic first-month discount - 30% off Starter and 40% off Pro - applied at checkout, no code needed. It's a one-time welcome offer on your first month; the plan then renews at the normal monthly price."))
+    faqs += [
         ("Is there really a free plan?",
          "Yes - free forever, no credit card required. You get all 100+ tools on 1 site, with 100 AI actions and 5 AI images a month."),
         ("Do I need to pay for AI separately?",

@@ -2780,20 +2780,28 @@ def welcome_discount_percent(plan: str) -> int:
 
 def welcome_eligible(user_id: str, fingerprint: str = "", ip: str = "") -> bool:
     """True only if this is a genuine first-time buyer who hasn't used the welcome
-    discount before - checked three ways so a new email alone can't re-claim it:
-      1. the user has NO prior completed paid plan transaction, AND
-      2. no welcome claim exists for this user / this device fingerprint / this IP.
+    discount before - checked several ways so it can't be double-dipped:
+      1. the user came in through an AFFILIATE link (referred_by set) -> NOT eligible.
+         The referrer already earns a commission on this sale; stacking the intro discount
+         on top would make the sale unprofitable. Affiliate OR discount, never both.
+      2. the user has NO prior completed paid plan transaction, AND
+      3. no welcome claim exists for this user / this device fingerprint / this IP.
     Any match -> not eligible."""
     fingerprint = (fingerprint or "").strip()[:128]
     ip = (ip or "").strip()[:64]
     with _pool.connection() as conn:
-        # 1) already bought a plan before? then not a first-time buyer.
+        # 1) referred by an affiliate? then the discount doesn't apply (commission instead).
+        ref = conn.execute(
+            "SELECT referred_by FROM users WHERE id=%s", (user_id,)).fetchone()
+        if ref and ref[0]:
+            return False
+        # 2) already bought a plan before? then not a first-time buyer.
         paid = conn.execute(
             "SELECT 1 FROM transactions WHERE user_id=%s AND kind='plan' "
             "AND status='completed' LIMIT 1", (user_id,)).fetchone()
         if paid:
             return False
-        # 2) has THIS user, or this device, or this IP already claimed a welcome discount?
+        # 3) has THIS user, or this device, or this IP already claimed a welcome discount?
         row = conn.execute(
             "SELECT 1 FROM welcome_claims WHERE user_id=%s "
             "   OR (fingerprint <> '' AND fingerprint=%s) "

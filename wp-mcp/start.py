@@ -1514,7 +1514,12 @@ async def asgi_app(scope, receive, send):
             await _send_html(send, 200, pages.service_seo_page())
             return
         if path == "/pricing" and method == "GET":
-            await _send_html(send, 200, pages.pricing_page(country=_geo_country(headers)))
+            # Affiliate visitors (ref cookie) don't get the welcome discount - they bring a
+            # commission instead - so don't advertise the badge to them.
+            _has_ref = any(p.strip().startswith("ref=") and len(p.strip()) > 4
+                           for p in headers.get(b"cookie", b"").decode().split(";"))
+            await _send_html(send, 200, pages.pricing_page(
+                country=_geo_country(headers), show_welcome=not _has_ref))
             return
         if path == "/set-currency" and method == "GET":
             # manual currency switch: ?c=IN|US + ?next=/path. Sets a 1-year cookie.
