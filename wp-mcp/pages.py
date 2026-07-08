@@ -4203,13 +4203,21 @@ def _plan_section(plan, account, toolcall_account, token_account,
     order = [p[0] for p in plans]
     cur_idx = order.index(plan) if plan in order else -1
 
+    # Expiry state (used by both the plan cards and the renewal line below).
+    is_paid = plan not in ("", "free", "unlimited")
+    days_to_expiry = usage.get("days_to_expiry")
+
     cards = ""
     for i, (key, name, usd, inr, who, feats) in enumerate(plans):
         amt = inr if is_india else usd
         current = (key == plan) or (key == "" and plan == "free")
         featured = (name == "Starter")
         lis = "".join(f'<li>{_CHECK} {f}</li>' for f in feats)
-        if current:
+        if current and key and is_paid and isinstance(days_to_expiry, int) and days_to_expiry <= 5:
+            # Current paid plan is about to expire -> let them renew (pay early) right here.
+            btn = (f'<a class="btn btn-primary btn-block" href="/checkout-after?plan={key}">'
+                   f'Renew now</a>')
+        elif current:
             btn = '<span class="btn btn-ghost btn-block" style="cursor:default;opacity:.7">Current plan</span>'
         elif key and (cur_idx == -1 or i > cur_idx):
             # Go to the review/checkout page first (amount + GST + coupon), not straight to Razorpay.
@@ -4257,7 +4265,22 @@ def _plan_section(plan, account, toolcall_account, token_account,
     renews_at = usage.get("renews_at")
     resets_on = usage.get("resets_on", "the 1st")
     csrf = usage.get("csrf", "")
-    is_paid = plan not in ("", "free", "unlimited")
+    # is_paid + days_to_expiry are computed above (before the plan cards).
+
+    # ---- "expiring soon" banner (paid, active, <= 3 days left) ----
+    expiry_banner = ""
+    if is_paid and sub_status == "active" and isinstance(days_to_expiry, int) \
+       and 0 <= days_to_expiry <= 3:
+        when = ("today" if days_to_expiry == 0 else
+                "tomorrow" if days_to_expiry == 1 else f"in {days_to_expiry} days")
+        pretty_name = plan_names.get(plan, plan.title())
+        expiry_banner = (
+            f'<div class=expiry-banner>'
+            f'<div><strong>Your {pretty_name} plan expires {when}.</strong> '
+            f'Renew now to keep all 100+ tools active - you can pay a couple of days '
+            f'early and your new month starts fresh from today.</div>'
+            f'<a class="btn btn-primary" href="/checkout-after?plan={plan}">Renew now</a>'
+            f'</div>')
     # Cancel control - only for a paid, still-active subscription (not already canceled/unlimited).
     cancel_ctl = ""
     if is_paid and sub_status == "active":
@@ -4316,6 +4339,7 @@ def _plan_section(plan, account, toolcall_account, token_account,
 </div>"""
 
     return f"""
+{expiry_banner}
 <div class=panel>
   <div class=plan-head>
     <div><p class=plan-eyebrow>Current plan</p>
@@ -4324,6 +4348,13 @@ def _plan_section(plan, account, toolcall_account, token_account,
   </div>
   <p class=hint style="margin:16px 0 0">{renew_line}</p>
 </div>
+<style>
+.expiry-banner{{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  background:var(--accent-dim);border:1px solid rgba(249,115,22,.35);border-radius:14px;
+  padding:16px 18px;margin:0 0 16px;color:var(--fg)}}
+.expiry-banner>div{{flex:1;min-width:220px;font-size:.95rem}}
+.expiry-banner .btn{{white-space:nowrap}}
+</style>
 
 {usage_panel}
 

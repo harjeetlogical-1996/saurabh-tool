@@ -215,14 +215,21 @@ This is a computer-generated invoice.</p>"""
 
 
 def send_renew_reminder(to, plan, days, renews_on=""):
-    when = f"in {days} day{'s' if days != 1 else ''}"
-    body = (f"Your <b>{plan}</b> plan renews {when}"
-            f"{(' on ' + renews_on) if renews_on else ''}.<br><br>"
-            "No action is needed - your plan and all 100+ tools stay active. If you'd like "
-            "to change or cancel, you can do it any time from your dashboard.")
-    return _send(to, f"Your {plan} plan renews soon",
-                 _wrap("Plan renewal reminder", body, "Manage plan",
-                       f"{SITE_URL}/dashboard#plan"))
+    """Plan-EXPIRING reminder for one-time plans: the user must pay again to keep it,
+    otherwise it drops to Free. (For true auto-renew subscriptions this isn't sent.)"""
+    when = ("today" if days <= 0 else
+            "tomorrow" if days == 1 else f"in {days} days")
+    body = (f"Your <b>{plan}</b> plan expires {when}"
+            f"{(' (' + renews_on + ')') if renews_on else ''}.<br><br>"
+            "To keep your plan and all 100+ tools active without interruption, please "
+            "renew now from your dashboard. If you don't renew, your account will move to "
+            "the Free plan when the current period ends - your site and data stay safe, "
+            "you just go back to the free limits.<br><br>"
+            "You can renew any time - even a couple of days early - and your new month "
+            "starts fresh from the day you pay.")
+    return _send(to, f"Your {plan} plan expires {when} - renew to stay active",
+                 _wrap("Your plan is expiring soon", body, "Renew my plan",
+                       f"{SITE_URL}/dashboard#plan", accent=_ACCENT_HI))
 
 
 def send_low_images(to, left, plan):
@@ -253,3 +260,20 @@ def send_site_connected(to, site_url):
     return _send(to, "Your site is connected ✓",
                  _wrap("Site connected", body, "Connect your AI",
                        f"{SITE_URL}/dashboard", accent="#059669"))
+
+
+def send_contact_notice(name, email, service, message, msg_id=None):
+    """Notify the owner (SELLER_EMAIL) that a new contact/quote lead came in."""
+    import html as _html
+    n = _html.escape(name or "")
+    e = _html.escape(email or "")
+    svc = _html.escape(service or "general")
+    m = _html.escape(message or "").replace("\n", "<br>")
+    body = (f"<b>New contact lead</b>{f' #{msg_id}' if msg_id else ''}<br><br>"
+            f"<b>Name:</b> {n}<br>"
+            f"<b>Email:</b> <a href=\"mailto:{e}\">{e}</a><br>"
+            f"<b>About:</b> {svc}<br><br>"
+            f"<b>Message:</b><br>{m}")
+    return _send(SELLER_EMAIL, f"New lead: {n} ({svc})",
+                 _wrap("New contact lead", body, "Open admin",
+                       f"{SITE_URL}/", accent=_ACCENT_HI))

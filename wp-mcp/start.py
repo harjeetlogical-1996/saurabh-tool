@@ -339,6 +339,31 @@ if MULTI_TENANT:
     # idempotent so even multiple instances can't double-downgrade.
     import threading as _threading
 
+    _PLAN_LABELS = {"owai_mini": "Mini", "owai_starter": "Starter", "owai_pro": "Pro",
+                    "pro": "Pro", "agency": "Agency"}
+
+    def _send_expiry_reminders():
+        """Email users whose one-time plan expires within 3 days (once per period)."""
+        try:
+            due = db.claim_expiring_users(within_days=3)
+        except Exception as e:  # noqa: BLE001
+            print(f"[expiry] claim_expiring_users failed: {e}")
+            return
+        for u in due:
+            try:
+                if not (email_mod.enabled() and db.email_enabled("payment")):
+                    continue
+                prof = db.get_profile(u["user_id"])
+                if not prof or not prof.get("email") or not prof.get("notify_email", True):
+                    continue
+                label = _PLAN_LABELS.get(u["plan"], u["plan"].title())
+                email_mod.send_renew_reminder(
+                    prof["email"], label, u["days_left"], u["renews_at"][:10])
+            except Exception as e:  # noqa: BLE001
+                print(f"[expiry] reminder email failed for {u.get('user_id')}: {e}")
+        if due:
+            print(f"[expiry] sent {len(due)} plan-expiry reminder(s)")
+
     def _expiry_worker():
         import time as _t
         while True:
@@ -348,6 +373,8 @@ if MULTI_TENANT:
                     print(f"[expiry] downgraded {n} expired plan(s) to free")
             except Exception as e:  # noqa: BLE001
                 print(f"[expiry] downgrade job failed: {e}")
+            # Send "your plan expires soon" reminders (one per period, 3 days ahead).
+            _send_expiry_reminders()
             _t.sleep(6 * 60 * 60)
 
     _threading.Thread(target=_expiry_worker, daemon=True, name="plan-expiry").start()

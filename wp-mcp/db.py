@@ -141,6 +141,9 @@ def _create_schema():
             ("low_img_notified", "ALTER TABLE users ADD COLUMN IF NOT EXISTS low_img_notified text NOT NULL DEFAULT ''"),
             ("active_site_id", "ALTER TABLE users ADD COLUMN IF NOT EXISTS active_site_id uuid"),
             ("renew_notified", "ALTER TABLE users ADD COLUMN IF NOT EXISTS renew_notified text NOT NULL DEFAULT ''"),
+            # Marks the sub_renews_at value we already sent an "expiring soon" email for, so
+            # each expiry period only triggers one reminder (reset when the plan is renewed).
+            ("expiry_notified", "ALTER TABLE users ADD COLUMN IF NOT EXISTS expiry_notified timestamptz"),
             ("gstin", "ALTER TABLE users ADD COLUMN IF NOT EXISTS gstin text NOT NULL DEFAULT ''"),
             # Session version: bumped on password change / logout-all / ban so old signed
             # cookies stop working. A session cookie embeds the version it was minted with.
@@ -1343,7 +1346,8 @@ def set_plan(user_id: str, plan: str, valid_days: int = 0):
             conn.execute(
                 "UPDATE users SET plan=%s, credits=%s, credits_month=%s, "
                 "ai_tokens=%s, ai_tokens_month=%s, tool_calls=%s, tool_calls_month=%s, "
-                "sub_renews_at = now() + make_interval(days => %s), renew_notified='' "
+                "sub_renews_at = now() + make_interval(days => %s), renew_notified='', "
+                "expiry_notified = NULL "   # new period -> allow a fresh expiry reminder
                 "WHERE id=%s",
                 (plan, imgs, this_month, toks, this_month, calls, this_month,
                  int(valid_days), user_id),
@@ -1381,6 +1385,32 @@ def downgrade_expired_plans():
             (fresh, this_month, toks, this_month, calls, this_month),
         ).fetchall()
     return len(rows)
+
+
+def claim_expiring_users(within_days: int = 3):
+    """Daily job helper: find paid, ACTIVE (not canceled/subscription) plans that expire
+    within `within_days` and haven't been reminded yet for THIS period. Atomically stamp
+    expiry_notified = the current sub_renews_at (so a re-run won't email again) and return
+    the claimed rows so the caller can send the email.
+
+    Returns list of {user_id, plan, renews_at, days_left}. Only ACTIVE one-time plans get
+    reminded - a 'canceled' user chose to leave, and true subscriptions auto-renew.
+    Race-safe: the stamping UPDATE ... RETURNING claims each row exactly once."""
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            "UPDATE users SET expiry_notified = sub_renews_at "
+            "WHERE plan NOT IN ('free','unlimited') "
+            "  AND sub_status = 'active' "
+            "  AND sub_renews_at IS NOT NULL "
+            "  AND sub_renews_at > now() "
+            "  AND sub_renews_at <= now() + make_interval(days => %s) "
+            "  AND (expiry_notified IS DISTINCT FROM sub_renews_at) "
+            "RETURNING id, plan, sub_renews_at, "
+            "          CEIL(EXTRACT(EPOCH FROM (sub_renews_at - now())) / 86400.0)::int",
+            (int(within_days),),
+        ).fetchall()
+    return [{"user_id": str(r[0]), "plan": r[1], "renews_at": str(r[2]),
+             "days_left": int(r[3])} for r in rows]
 
 
 def cancel_subscription(user_id: str, at_period_end: bool = True):
@@ -2171,10 +2201,14 @@ def admin_inactive_users(days: int = 30, limit: int = 15):
 def get_usage_summary(user_id: str):
     """For the user's Plan page: renewal date + this-month usage breakdown."""
     with _pool.connection() as conn:
-        r = conn.execute("SELECT sub_status, sub_renews_at, created_at FROM users WHERE id=%s",
-                         (user_id,)).fetchone()
+        r = conn.execute(
+            "SELECT sub_status, sub_renews_at, created_at, "
+            "  CASE WHEN sub_renews_at IS NULL THEN NULL "
+            "       ELSE CEIL(EXTRACT(EPOCH FROM (sub_renews_at - now())) / 86400.0)::int END "
+            "FROM users WHERE id=%s", (user_id,)).fetchone()
         sub_status = r[0] if r else "none"
         renews_at = str(r[1]) if r and r[1] else None
+        days_to_expiry = int(r[3]) if r and r[3] is not None else None
         # usage since the start of this calendar month (limits reset on the 1st)
         actions = conn.execute(
             "SELECT count(*) FROM usage_logs WHERE user_id=%s "
@@ -2193,6 +2227,7 @@ def get_usage_summary(user_id: str):
         ).fetchone()[0]
     return {
         "sub_status": sub_status, "renews_at": renews_at, "resets_on": reset,
+        "days_to_expiry": days_to_expiry,
         "actions_used": actions, "images_used": images,
         "top": [(k, n) for k, n in top],
     }
