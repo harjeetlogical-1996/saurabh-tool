@@ -2061,6 +2061,72 @@ async def asgi_app(scope, receive, send):
             await _send_html(send, 302, "", [(b"location", b"/dashboard?ok=Analytics+settings+saved")])
             return
 
+        # ----- Bing Webmaster Tools (API-key connect) -----
+        if path == "/bing/connect" and method == "POST":
+            uid = _get_active_uid(headers)
+            if not uid:
+                await _send_html(send, 302, "", [(b"location", b"/login")])
+                return
+            f = _form(await _read_body(receive))
+            if not _csrf_ok(headers, f):
+                await _send_html(send, 302, "", [(b"location",
+                    b"/dashboard?err=Session+expired,+please+retry#analytics")])
+                return
+            api_key = (f.get("bing_key", "") or "").strip()
+            _bsite = _safe_uuid(f.get("site_id", "")) or None
+            if not api_key:
+                await _send_html(send, 302, "", [(b"location",
+                    b"/dashboard?err=Please+paste+your+Bing+API+key#analytics")])
+                return
+            # Validate the key by listing the user's Bing sites before saving.
+            try:
+                import bing_api as _bing
+                sites, berr = _bing.verify_key(api_key)
+            except Exception as e:  # noqa: BLE001
+                sites, berr = None, str(e)[:150]
+            if berr or sites is None:
+                _msg = urllib.parse.quote((berr or "Could not verify the Bing API key.")[:150])
+                await _send_html(send, 302, "", [(b"location",
+                    (f"/dashboard?err={_msg}#analytics").encode())])
+                return
+            # Pick the Bing site: match this WordPress site's URL if present, else the
+            # first site on the account (user can't easily mismatch a single-site account).
+            chosen = ""
+            try:
+                _wp = (db.get_primary_site(uid) or {}).get("site_url", "").rstrip("/")
+                if _bsite:
+                    m = db.get_site_by_ref(uid, _bsite)
+                    if m:
+                        _wp = (m.get("site_url") or _wp).rstrip("/")
+                for s in sites:
+                    su = (s.get("url") or "").rstrip("/")
+                    if _wp and (su == _wp or _wp in su or su in _wp):
+                        chosen = s.get("url", "")
+                        break
+                if not chosen and len(sites) == 1:
+                    chosen = sites[0].get("url", "")
+            except Exception:
+                if sites:
+                    chosen = sites[0].get("url", "")
+            db.save_bing_account(uid, api_key, bing_site=chosen, site_id=_bsite)
+            await _send_html(send, 302, "", [(b"location",
+                b"/dashboard?ok=Bing+connected#analytics")])
+            return
+
+        if path == "/bing/disconnect" and method == "POST":
+            uid = _get_active_uid(headers)
+            if not uid:
+                await _send_html(send, 401, "Not logged in")
+                return
+            f = _form(await _read_body(receive))
+            if not _csrf_ok(headers, f):
+                await _send_html(send, 403, "Bad CSRF token")
+                return
+            _bsite = _safe_uuid(f.get("site_id", "")) or None
+            db.delete_bing_account(uid, site_id=_bsite)
+            await _send_html(send, 302, "", [(b"location", b"/dashboard?ok=Bing+disconnected#analytics")])
+            return
+
         if path == "/signup" and method == "POST":
             f = _form(await _read_body(receive))
             nxt = f.get("next", "")
@@ -2349,6 +2415,7 @@ async def asgi_app(scope, receive, send):
                                          "error": _pe or _se or ""}
                 except Exception as _e:  # noqa: BLE001
                     google_opts[_key] = {"properties": [], "sites": [], "error": str(_e)[:120]}
+            bing_all = db.list_bing_accounts(uid)
             await _send_html(send, 200, pages.dashboard(
                 sites, PUBLIC_URL, account, flash, ok, email=email_addr, verified=verified,
                 token_account=token_acct, toolcall_account=toolcall_acct,
@@ -2356,7 +2423,7 @@ async def asgi_app(scope, receive, send):
                 country=_country, txns=txns, usage=usage, profile=profile,
                 csrf=_csrf_token(uid), affiliate=affiliate,
                 google=google_acct, google_configured=google_api.configured(),
-                google_all=google_all, google_opts=google_opts))
+                google_all=google_all, google_opts=google_opts, bing_all=bing_all))
             return
         # ----- Affiliate: save payout method + request payout -----
         if path == "/affiliate/payout-method" and method == "POST":

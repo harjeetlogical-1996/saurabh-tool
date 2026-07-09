@@ -4200,6 +4200,122 @@ def ga_search_pages(days: int = 28, limit: int = 25) -> str:
                        "top_pages": rows}, indent=2, ensure_ascii=False)
 
 
+# ===========================================================================
+# BING WEBMASTER TOOLS - review the user's Bing/Microsoft search data.
+# The user connects once by pasting their Bing Webmaster API key (Connect Bing in
+# the dashboard). API-key based, per-site. Read-only except submit_url.
+# ===========================================================================
+def _bing_ctx():
+    """Return (api_key, account) for the CURRENT SITE's Bing connection (or the
+    user-level default), or raise a friendly error."""
+    import db as _db
+    uid = _cfg().get("user_id")
+    if not uid:
+        raise RuntimeError("No user context for this request.")
+    sid = _current_site_id()
+    key = _db.get_bing_api_key(uid, site_id=sid)
+    if not key:
+        raise RuntimeError("Bing Webmaster Tools is not connected for this site. Open your "
+                           "wptaskify dashboard, select this site, and add your Bing "
+                           "Webmaster API key (Connect Bing).")
+    acct = _db.get_bing_account(uid, site_id=sid)
+    return key, acct
+
+
+def _bing_site(acct):
+    site = (acct or {}).get("bing_site") or ""
+    if not site:
+        # Fall back to the WordPress site URL if no explicit Bing site was chosen.
+        site = (_cfg().get("site_url") or "").rstrip("/")
+    if not site:
+        raise RuntimeError("No Bing site selected. Reconnect Bing from your dashboard.")
+    return site
+
+
+@mcp.tool()
+def bing_status() -> str:
+    """Check whether Bing Webmaster Tools is connected for the current site, and which
+    Bing site is selected. Use this first if other bing_ tools say 'not connected'."""
+    import db as _db
+    uid = _cfg().get("user_id")
+    sid = _current_site_id()
+    key = _db.get_bing_api_key(uid, site_id=sid) if uid else None
+    acct = _db.get_bing_account(uid, site_id=sid) if uid else {}
+    return json.dumps({
+        "connected": bool(key),
+        "bing_site": (acct or {}).get("bing_site", ""),
+        "hint": ("" if key else "Add your Bing Webmaster API key in the dashboard "
+                 "(Connect Bing). Get the key from Bing Webmaster Tools -> Settings -> "
+                 "API access."),
+    }, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def bing_search_queries(limit: int = 25) -> str:
+    """Bing Webmaster Tools: the top search QUERIES bringing you clicks from Bing
+    (query, clicks, impressions, avg position). Real Microsoft/Bing search data.
+    Requires a connected Bing account (see bing_status)."""
+    _require_tier('paid')
+    import bing_api as _b
+    key, acct = _bing_ctx()
+    site = _bing_site(acct)
+    rows, err = _b.query_stats(key, site, limit=limit)
+    if err:
+        return json.dumps({"error": err})
+    return json.dumps({"engine": "bing", "site": site, "top_queries": rows},
+                      indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def bing_top_pages(limit: int = 25) -> str:
+    """Bing Webmaster Tools: the top PAGES by Bing search traffic (page, clicks,
+    impressions). Requires a connected Bing account."""
+    _require_tier('paid')
+    import bing_api as _b
+    key, acct = _bing_ctx()
+    site = _bing_site(acct)
+    rows, err = _b.page_stats(key, site, limit=limit)
+    if err:
+        return json.dumps({"error": err})
+    return json.dumps({"engine": "bing", "site": site, "top_pages": rows},
+                      indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def bing_crawl_stats() -> str:
+    """Bing Webmaster Tools: crawl / index status for the site - pages crawled, pages
+    in the Bing index, crawl errors, and pages blocked by robots.txt. Bing's crawl
+    reporting is detailed. Requires a connected Bing account."""
+    _require_tier('paid')
+    import bing_api as _b
+    key, acct = _bing_ctx()
+    site = _bing_site(acct)
+    summary, err = _b.crawl_stats(key, site)
+    if err:
+        return json.dumps({"error": err})
+    return json.dumps({"engine": "bing", "site": site, "crawl": summary},
+                      indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def bing_submit_url(url: str) -> str:
+    """Ask Bing to (re)crawl and index a specific URL right away. Great after publishing
+    or updating a page - Bing accepts direct URL submission instantly (unlike Google).
+    Requires a connected Bing account."""
+    _require_tier('paid')
+    import bing_api as _b
+    key, acct = _bing_ctx()
+    site = _bing_site(acct)
+    if not url or not url.startswith("http"):
+        return json.dumps({"error": "Provide a full URL (https://...)."})
+    ok, err = _b.submit_url(key, site, url)
+    if not ok:
+        return json.dumps({"error": err or "Bing rejected the submission."})
+    return json.dumps({"engine": "bing", "site": site, "submitted": url,
+                       "result": "Bing will crawl this URL soon."},
+                      indent=2, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     mcp.settings.host = "0.0.0.0"

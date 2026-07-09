@@ -4454,6 +4454,53 @@ def _google_conn_card(title, subtitle, conn, public_url, csrf, site_id="", opts=
         f'</div>')
 
 
+def _bing_section(csrf="", bing_all=None):
+    """Bing Webmaster Tools connect card (API-key based). Mirrors the Google card but
+    simpler: paste one API key. Shows connected sites, disconnect, and how to get a key."""
+    bing_all = bing_all or []
+    connected = [b for b in bing_all if b]
+    if connected:
+        rows = ""
+        for b in connected:
+            site = _e_html(b.get("bing_site") or b.get("site_url") or "your site")
+            sid = b.get("site_id") or ""
+            rows += (
+                f'<div class=gconn>'
+                f'<div><div class=glbl>{_CHECK} Connected</div>'
+                f'<div class=hint style="margin-top:2px">Bing site: <strong>{site}</strong></div></div>'
+                f'<form method=post action=/bing/disconnect style=margin:0>'
+                f'<input type=hidden name=csrf value="{_e_html(csrf)}">'
+                f'<input type=hidden name=site_id value="{_e_html(sid)}">'
+                f'<button class="btn btn-ghost mini" type=submit>Disconnect</button></form>'
+                f'</div>')
+        inner = rows
+    else:
+        inner = (
+            '<p class=hint>Connect Bing Webmaster Tools to let your AI review your '
+            'Microsoft/Bing search data - top queries, pages, crawl status - and submit '
+            'URLs to Bing for instant indexing.</p>'
+            '<form method=post action=/bing/connect class=bing-form>'
+            f'<input type=hidden name=csrf value="{_e_html(csrf)}">'
+            '<label class=glbl for=bkey>Bing Webmaster API key</label>'
+            '<input id=bkey name=bing_key type=text autocomplete=off '
+            'placeholder="Paste your Bing Webmaster API key" '
+            'style="width:100%;padding:11px 14px;border:1px solid var(--border-hi);'
+            'border-radius:10px;background:var(--surface2);color:var(--fg);margin:6px 0 4px">'
+            '<p class=hint style="margin:4px 0 10px">Get it from '
+            '<a href="https://www.bing.com/webmasters" target=_blank rel=noopener>Bing '
+            'Webmaster Tools</a> -> Settings -> <b>API access</b> -> API Key.</p>'
+            '<button class="btn btn-primary" type=submit>Connect Bing</button>'
+            '</form>')
+    return f"""
+<div class=panel>
+  <h2>Bing Webmaster Tools</h2>
+  {inner}
+</div>
+<style>
+.bing-form{{margin-top:6px}}
+</style>"""
+
+
 def _google_section(google, public_url, csrf="", configured=True, sites=None,
                     google_all=None, google_opts=None):
     """Google Analytics + Search Console. Per-SITE Google accounts (each WordPress
@@ -4746,12 +4793,14 @@ def _affiliate_section(aff, public_url, csrf="", verified=True):
 def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="", verified=True,
               token_account=None, chat_enabled=True, toolcall_account=None,
               country="", txns=None, usage=None, profile=None, csrf="", affiliate=None,
-              google=None, google_configured=True, google_all=None, google_opts=None):
+              google=None, google_configured=True, google_all=None, google_opts=None,
+              bing_all=None):
     connect = f"{public_url}/mcp" if public_url else "(set PUBLIC_URL)"
     settings_html = _settings_section(profile or {"email": email, "verified": verified})
     google_html = _google_section(google or {}, public_url, csrf, google_configured,
                                   sites=sites, google_all=google_all or [],
                                   google_opts=google_opts or {})
+    google_html += _bing_section(csrf, bing_all or [])
     affiliate_html = _affiliate_section(affiliate or {}, public_url, csrf, verified)
     plugin_url = f"{public_url}/plugin/wp-pilot-seo.zip" if public_url else "/plugin/wp-pilot-seo.zip"
     account = account or {"plan": "free", "credits": 5, "has_own_key": False}

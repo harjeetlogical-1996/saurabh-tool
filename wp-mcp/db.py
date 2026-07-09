@@ -278,6 +278,21 @@ def _create_schema():
         conn.execute("ALTER TABLE google_accounts ADD COLUMN IF NOT EXISTS site_id uuid REFERENCES wordpress_sites(id) ON DELETE CASCADE;")
         conn.execute("ALTER TABLE google_accounts DROP CONSTRAINT IF EXISTS google_accounts_pkey;")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_google_user_site ON google_accounts (user_id, COALESCE(site_id, '00000000-0000-0000-0000-000000000000'::uuid));")
+        # ----- Bing Webmaster Tools (API-key based, per (user, site)) -----
+        # Same per-site shape as google_accounts. api_key stored encrypted (AES-GCM).
+        # bing_site = the site URL as registered in Bing Webmaster Tools.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bing_accounts (
+                user_id       uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                site_id       uuid REFERENCES wordpress_sites(id) ON DELETE CASCADE,
+                api_key_enc   bytea NOT NULL,
+                api_key_nonce bytea NOT NULL,
+                bing_site     text NOT NULL DEFAULT '',
+                connected_at  timestamptz NOT NULL DEFAULT now()
+            );
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_bing_user_site "
+                     "ON bing_accounts (user_id, COALESCE(site_id, '00000000-0000-0000-0000-000000000000'::uuid));")
         # AI SEO score history - powers the weekly report card (before -> after).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS score_snapshots (
@@ -1009,6 +1024,96 @@ def list_google_accounts(user_id: str):
     return [{"site_id": str(r[0]) if r[0] else None, "google_email": r[1],
              "ga_property_id": r[2], "sc_site": r[3],
              "site_url": r[4] or "(account default)"} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Bing Webmaster Tools (API-key, per (user, site)) - mirrors the Google helpers.
+# ---------------------------------------------------------------------------
+def save_bing_account(user_id: str, api_key: str, bing_site: str = "", site_id: str = None):
+    """Store (encrypted) a Bing Webmaster API key for this user, optionally scoped to a
+    specific site. Upserts on (user_id, site_id)."""
+    ct, nonce = encrypt_secret(api_key.strip())
+    sid = site_id or None
+    with _pool.connection() as conn:
+        updated = conn.execute(
+            """UPDATE bing_accounts
+               SET api_key_enc=%s, api_key_nonce=%s, bing_site=%s, connected_at=now()
+               WHERE user_id=%s AND COALESCE(site_id,%s::uuid)=COALESCE(%s::uuid,%s::uuid)""",
+            (ct, nonce, bing_site or "", user_id, _G_SENTINEL, sid, _G_SENTINEL),
+        ).rowcount
+        if not updated:
+            conn.execute(
+                """INSERT INTO bing_accounts (user_id, site_id, api_key_enc, api_key_nonce, bing_site)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (user_id, sid, ct, nonce, bing_site or ""),
+            )
+
+
+def _bing_row(conn, user_id, site_id, cols):
+    """Fetch a bing_accounts row for (user, site), falling back to the user-level one."""
+    sid = site_id or None
+    if sid:
+        row = conn.execute(
+            f"SELECT {cols} FROM bing_accounts WHERE user_id=%s AND site_id=%s",
+            (user_id, sid)).fetchone()
+        if row:
+            return row
+    return conn.execute(
+        f"SELECT {cols} FROM bing_accounts WHERE user_id=%s AND site_id IS NULL",
+        (user_id,)).fetchone()
+
+
+def get_bing_api_key(user_id: str, site_id: str = None):
+    """Return the decrypted Bing API key for this user/site, or None."""
+    with _pool.connection() as conn:
+        row = _bing_row(conn, user_id, site_id, "api_key_enc, api_key_nonce")
+    if not row or row[0] is None:
+        return None
+    return decrypt_secret(row[0], row[1])
+
+
+def get_bing_account(user_id: str, site_id: str = None):
+    """Return {connected, bing_site} for this user/site."""
+    with _pool.connection() as conn:
+        row = _bing_row(conn, user_id, site_id, "bing_site")
+    if not row:
+        return {"connected": False, "bing_site": ""}
+    return {"connected": True, "bing_site": row[0]}
+
+
+def set_bing_site(user_id: str, bing_site: str, site_id: str = None):
+    """Set the chosen Bing site URL for this user/site."""
+    sid = site_id or None
+    with _pool.connection() as conn:
+        conn.execute(
+            "UPDATE bing_accounts SET bing_site=%s "
+            "WHERE user_id=%s AND COALESCE(site_id,%s::uuid)=COALESCE(%s::uuid,%s::uuid)",
+            (bing_site, user_id, _G_SENTINEL, sid, _G_SENTINEL))
+
+
+def delete_bing_account(user_id: str, site_id: str = None):
+    """Disconnect Bing for this user/site."""
+    sid = site_id or None
+    with _pool.connection() as conn:
+        if sid:
+            conn.execute("DELETE FROM bing_accounts WHERE user_id=%s AND site_id=%s",
+                         (user_id, sid))
+        else:
+            conn.execute("DELETE FROM bing_accounts WHERE user_id=%s AND site_id IS NULL",
+                         (user_id,))
+
+
+def list_bing_accounts(user_id: str):
+    """List all Bing connections for a user, with which site (if any) each is for."""
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            """SELECT b.site_id, b.bing_site, s.site_url
+               FROM bing_accounts b
+               LEFT JOIN wordpress_sites s ON s.id = b.site_id
+               WHERE b.user_id = %s ORDER BY b.connected_at DESC""",
+            (user_id,)).fetchall()
+    return [{"site_id": str(r[0]) if r[0] else None, "bing_site": r[1],
+             "site_url": r[2] or "(account default)"} for r in rows]
 
 
 # ---------------------------------------------------------------------------
