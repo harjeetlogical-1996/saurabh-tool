@@ -1135,21 +1135,21 @@ def landing(logged_in=False, country=""):
     own_ai_plans = [
         ("", "Free", "$0", "₹0", "/mo", False, "Start free",
          ["1 WordPress site", "100 AI actions / month", "5 AI images / month",
-          "All 100+ tools", "Use your own Claude or ChatGPT"]),
+          "Read-only SEO tools", "Use your own Claude or ChatGPT"]),
     ]
     # India-only "Mini" plan: a low-cost entry tier with smaller limits.
     if is_india:
         own_ai_plans.append(
             ("owai_mini", "Mini", "$9", "₹700", "/mo", False, "Get Mini",
              ["1 site", "800 AI actions / month", "25 AI images / month",
-              "All 100+ tools", "Great for a single blog"]))
+              "Publishing, bulk & AI images", "Great for a single blog"]))
     own_ai_plans += [
         ("owai_starter", "Starter", "$20", "₹1,699", "/mo", True, "Get Starter",
          ["2 sites", "2,000 AI actions / month", "60 AI images / month",
-          "All 100+ tools", "Priority support"]),
+          "Publishing, bulk, images & analytics", "Priority support"]),
         ("owai_pro", "Pro", "$99", "₹8,299", "/mo", False, "Get Pro",
          ["10 sites", "Unlimited AI actions", "200 AI images / month",
-          "All 100+ tools", "White-glove onboarding"]),
+          "Everything + Studio (themes/plugins)", "White-glove onboarding"]),
     ]
     chat_plans = [
         ("chat_starter", "Chat Starter", "$30", "₹2,499", "/mo", False, "Get Chat Starter",
@@ -3088,13 +3088,21 @@ def pricing_page(country="", show_welcome=True):
                     f'<div class=amt>{cur}{_fs}<span>first month</span></div>'
                     f'<p class=amt-then><s>{amt}</s> &rarr; {cur}{_fs} first month, '
                     f'then {amt}/mo</p>')
+        # Accurate "tools included" line per tier (free is read-only SEO; paid unlocks
+        # publishing/bulk/images/analytics; Pro adds Studio: theme/plugin/file editing).
+        if name == "Free":
+            tools_line = "Read-only SEO tools (audit, score, list &amp; get content)"
+        elif name == "Pro":
+            tools_line = "All 130+ tools, including Studio (themes, plugins, files)"
+        else:
+            tools_line = "100+ tools: publishing, bulk edits, AI images &amp; analytics"
         cards += (
             f'<div class="{cls}">{tag}{promo_badge}<h3>{name}</h3>'
             f'<p class=price-who>{who}</p>'
             f'{price_block}'
             f'<a href="{href}" class="btn {btn} btn-block">{cta}</a>'
             f'<ul>{lis}</ul>'
-            f'<p class=price-all>{_CHECK} All 100+ tools included</p></div>')
+            f'<p class=price-all>{_CHECK} {tools_line}</p></div>')
     cols = "cols4" if len(plans) >= 4 else "cols3"
 
     # Plain-HTML declarative price sentence (AEO - always both currencies for machines).
@@ -3104,8 +3112,10 @@ def pricing_page(country="", show_welcome=True):
     aeo_prices = ("wptaskify pricing (2026): Free $0, Starter $20/month, Pro $99/month. "
                   "In India: Free ₹0, Mini ₹700, Starter ₹1,699, Pro ₹8,299 per month. "
                   + _welcome_sentence +
-                  "Every plan includes all 100+ WordPress tools; you bring your own Claude or "
-                  "ChatGPT, so there is no extra AI subscription.")
+                  "The free plan includes read-only SEO tools (audit, score, list and get "
+                  "content). Paid plans unlock publishing, bulk edits, AI images and Google/Bing "
+                  "analytics; the Pro plan adds Studio (theme, plugin and file editing). You bring "
+                  "your own Claude or ChatGPT, so there is no extra AI subscription.")
 
     # Comparison table (real HTML - AEO parseable). Columns depend on region.
     if is_india:
@@ -3115,7 +3125,10 @@ def pricing_page(country="", show_welcome=True):
             ("WordPress sites", ["1", "1", "2", "10"]),
             ("AI actions / month", ["100", "800", "2,000", "Unlimited"]),
             ("AI images / month", ["5", "25", "60", "200"]),
-            ("All 100+ tools", ["✓", "✓", "✓", "✓"]),
+            ("Read &amp; SEO audit tools", ["✓", "✓", "✓", "✓"]),
+            ("Publish, bulk edits &amp; AI images", ["—", "✓", "✓", "✓"]),
+            ("Google &amp; Bing analytics", ["—", "✓", "✓", "✓"]),
+            ("Studio (themes, plugins, files)", ["—", "—", "—", "✓"]),
             ("Support", ["Community", "Email", "Priority", "White-glove"]),
         ]
     else:
@@ -3125,7 +3138,10 @@ def pricing_page(country="", show_welcome=True):
             ("WordPress sites", ["1", "2", "10"]),
             ("AI actions / month", ["100", "2,000", "Unlimited"]),
             ("AI images / month", ["5", "60", "200"]),
-            ("All 100+ tools", ["✓", "✓", "✓"]),
+            ("Read &amp; SEO audit tools", ["✓", "✓", "✓"]),
+            ("Publish, bulk edits &amp; AI images", ["—", "✓", "✓"]),
+            ("Google &amp; Bing analytics", ["—", "✓", "✓"]),
+            ("Studio (themes, plugins, files)", ["—", "—", "✓"]),
             ("Support", ["Community", "Priority", "White-glove"]),
         ]
     thead = "<tr><th></th>" + "".join(f"<th>{c}</th>" for c in cols_h) + "</tr>"
@@ -3138,7 +3154,7 @@ def pricing_page(country="", show_welcome=True):
     # Pricing FAQ (maps 1:1 to anxieties).
     faqs = [
         ("How much does wptaskify cost?",
-         f"Plans start free. Paid plans are Starter at {'₹1,699' if is_india else '$20'}/month and Pro at {'₹8,299' if is_india else '$99'}/month{', with an India-only Mini plan at ₹700/month' if is_india else ''}. Every plan includes all 100+ tools."),
+         f"Plans start free. Paid plans are Starter at {'₹1,699' if is_india else '$20'}/month and Pro at {'₹8,299' if is_india else '$99'}/month{', with an India-only Mini plan at ₹700/month' if is_india else ''}. The free plan is read-only SEO; paid plans unlock the full toolset."),
     ]
     if show_welcome:
         faqs.append(
@@ -3146,15 +3162,17 @@ def pricing_page(country="", show_welcome=True):
              "Yes. New customers get an automatic first-month discount - 30% off Starter and 40% off Pro - applied at checkout, no code needed. It's a one-time welcome offer on your first month; the plan then renews at the normal monthly price."))
     faqs += [
         ("Is there really a free plan?",
-         "Yes - free forever, no credit card required. You get all 100+ tools on 1 site, with 100 AI actions and 5 AI images a month."),
+         "Yes - free forever, no credit card required. The free plan includes the read-only SEO tools (audit, score, list and get content) on 1 site, with 100 AI actions and 5 AI images a month. Publishing, bulk edits, AI images and analytics unlock on a paid plan."),
+        ("What tools do I get on each plan?",
+         "The free plan is read-only: SEO audit, SEO score, and listing or reading your content. Paid plans (Mini, Starter, Pro) unlock the full set - publishing, bulk edits, AI image generation, internal links, and Google and Bing analytics. The Pro plan also adds Studio: creating and editing themes, plugins and files."),
         ("Do I need to pay for AI separately?",
          "You use your own Claude or ChatGPT account, so we never charge you for AI. A standard $20/month Claude or ChatGPT plan is all you need, and you are never paying for AI twice."),
         ("What is an \"AI action\"?",
          "One AI action is one thing the AI does on your site - write a post, fix a page's SEO, or add an internal link. Images are counted separately. For scale, 2,000 actions is roughly dozens of full articles plus hundreds of SEO fixes a month."),
         ("What happens when I hit my monthly limit?",
          "Actions simply pause until your next cycle or you upgrade. Nothing breaks and there are no surprise overage charges."),
-        ("Do I get all the tools on the free plan?",
-         "Yes. Every plan includes all 100+ tools. Plans differ only by monthly limits, number of sites, and support - never by which tools you get."),
+        ("What tools does the free plan include?",
+         "The free plan gives you the read-only SEO tools - SEO audit, SEO score, and listing or reading your content - so you can try wptaskify on a real site. Publishing, bulk edits, AI images and Google/Bing analytics unlock on any paid plan, and the Pro plan adds Studio (theme, plugin and file editing)."),
         ("Can I cancel anytime?",
          "Yes. Billing is monthly, you can cancel in one click, and there is no annual lock-in."),
         ("Is my payment safe?",
@@ -3167,7 +3185,7 @@ def pricing_page(country="", show_welcome=True):
         for q, a in faqs)
 
     body = f"""
-<p>All 100+ tools on every plan. You bring your own Claude or ChatGPT, so there is <b>no extra AI subscription</b>. Start free, upgrade any time, cancel whenever. <span style="display:none">{aeo_prices}</span></p>
+<p>Start free with read-only SEO tools; unlock publishing, AI images and analytics on a paid plan. You bring your own Claude or ChatGPT, so there is <b>no extra AI subscription</b>. Upgrade any time, cancel whenever. <span style="display:none">{aeo_prices}</span></p>
 
 <div class=noaibill>{_CHECK} <span>No second AI bill - wptaskify plugs into the Claude or ChatGPT plan you already have.</span></div>
 
@@ -3196,7 +3214,7 @@ def pricing_page(country="", show_welcome=True):
 
 <div class=fcta>
 <h3>Start free - no credit card</h3>
-<p class=fcta-sub>All 100+ tools on 1 site. Bring your own Claude or ChatGPT and upgrade only when you outgrow the free limits.</p>
+<p class=fcta-sub>Start free with read-only SEO tools on 1 site. Bring your own Claude or ChatGPT and upgrade when you're ready to publish and scale.</p>
 <a href="/?signup" class="btn btn-primary">Start free</a>
 <p class=fcta-fine>Free forever plan. No surprise overages. Cancel paid plans anytime.</p>
 </div>
@@ -3267,16 +3285,16 @@ def pricing_page(country="", show_welcome=True):
     # Only /faq carries FAQPage schema (canonical). Pricing keeps Product/AggregateOffer;
     # its mini-FAQ is visual-only to avoid duplicate-FAQPage dilution.
     schema = ('{"@context":"https://schema.org",'
-              '"@type":"Product","name":"wptaskify","description":"Connect WordPress to your own Claude or ChatGPT - 100+ AI tools on every plan.",'
+              '"@type":"Product","name":"wptaskify","description":"Connect WordPress to your own Claude or ChatGPT - 100+ AI tools; free plan is read-only SEO, paid plans unlock publishing, images and analytics.",'
               '"offers":{"@type":"AggregateOffer","lowPrice":"' + lo + '","highPrice":"' + hi +
               '","priceCurrency":"' + ccy + '","offerCount":"' + str(len(plans)) +
               '","offers":[' + ",".join(offers) + ']}}')
     return _content_page(
         "Pricing",
-        "wptaskify pricing: free to start, Starter $20/mo, Pro $99/mo (local pricing in India). All 100+ tools on every plan. Bring your own Claude or ChatGPT - no extra AI subscription.",
+        "wptaskify pricing: free to start (read-only SEO tools), Starter $20/mo, Pro $99/mo (local pricing in India). Paid plans unlock publishing, AI images and analytics; Pro adds Studio. Bring your own Claude or ChatGPT - no extra AI subscription.",
         body, canonical="/pricing", wide=True, schema_json=schema,
         hero_img=f"{SITE_BASE}/assets/hero-pricing.webp",
-        hero_sub="All 100+ tools on every plan. Bring your own AI - no extra AI bill.",
+        hero_sub="Free plan is read-only SEO; paid plans unlock the full toolset. Bring your own AI - no extra AI bill.",
         keywords="wptaskify pricing, how much does wptaskify cost, wordpress ai pricing, ai wordpress plans, wptaskify free plan")
 
 
@@ -3327,9 +3345,9 @@ _FAQ_GROUPS = [
     ]),
     ("Pricing & plans", "pricing", [
         ("How much does wptaskify cost?",
-         "wptaskify starts free. Paid plans are Starter at $20/month and Pro at $99/month (local pricing in India: Mini ₹700, Starter ₹1,699, Pro ₹8,299). Every plan includes all 100+ tools, and because you bring your own AI there is no extra AI subscription."),
+         "wptaskify starts free. Paid plans are Starter at $20/month and Pro at $99/month (local pricing in India: Mini ₹700, Starter ₹1,699, Pro ₹8,299). The free plan is read-only SEO tools; paid plans unlock publishing, AI images and analytics, and Pro adds Studio. Because you bring your own AI there is no extra AI subscription."),
         ("Is the free plan really free, and what are its limits?",
-         "Yes - the free plan is free forever with no credit card required. It includes all 100+ tools on 1 site, with 100 AI actions and 5 AI images per month."),
+         "Yes - the free plan is free forever with no credit card required. It includes the read-only SEO tools (audit, score, list and get content) on 1 site, with 100 AI actions and 5 AI images per month. Publishing and the rest unlock on a paid plan."),
         ("What's the difference between the Free, Starter and Pro plans?",
          "All plans include every tool; they differ only by monthly limits, number of sites, and support. Free covers 1 site and 100 actions, Starter raises that to 2,000 actions with priority support, and Pro adds 10 sites, unlimited actions and white-glove onboarding."),
         ("What happens when I hit my monthly AI-action limit?",
@@ -3774,8 +3792,8 @@ def tools_page():
     faqs = [
         ("How many tools does wptaskify have?",
          f"wptaskify gives your AI {shown}+ WordPress tools across {ncats} categories: content and publishing, images and media, SEO and meta, AI search and GEO, internal links, taxonomy and menus, users and comments, themes and plugins, and backups and site health."),
-        ("Do I get all the tools on the free plan?",
-         "Yes. Every plan - including the free one - unlocks all 100+ tools. Paid plans raise your monthly limits on AI actions and images, not which tools you can use."),
+        ("What tools does the free plan include?",
+         "The free plan includes the read-only SEO tools - SEO audit, SEO score, and reading your content. Paid plans unlock publishing, bulk edits, AI images and Google/Bing analytics; the Pro plan adds Studio (theme, plugin and file editing)."),
         ("Does wptaskify support redirects, alt text, backups and llms.txt?",
          "Yes. It can create 301 redirects, AI-write missing alt text in bulk, take full-site backups with one-click restore, and edit robots.txt, llms.txt and .htaccess - among 100+ tools."),
         ("Do I need to learn how to use each tool?",
@@ -3809,7 +3827,7 @@ def tools_page():
 <h3>Found the tool you need?</h3>
 <p class=fcta-sub>Connect your WordPress site free and try it with your own Claude or ChatGPT.</p>
 <a href="/?signup" class="btn btn-primary">Connect my site free</a>
-<p class=fcta-fine>All 100+ tools on every plan. Nothing goes live without your approval.</p>
+<p class=fcta-fine>Free plan is read-only SEO; paid plans unlock the full toolset. Nothing goes live without your approval.</p>
 </div>
 
 <h2 class=tsec-h>At a glance</h2>
@@ -3935,10 +3953,10 @@ def tools_page():
               '"featureList":[' + feat_list + ']}]}')
     return _content_page(
         "All tools",
-        f"The full list of {shown}+ WordPress tools wptaskify gives your AI across {ncats} categories - content, SEO, GEO, images, internal links, themes, plugins and backups. All tools on every plan.",
+        f"The full list of {shown}+ WordPress tools wptaskify gives your AI across {ncats} categories - content, SEO, GEO, images, internal links, themes, plugins and backups. Free plan is read-only SEO; paid plans unlock the rest.",
         body, canonical="/tools", schema_json=schema, wide=True,
         hero_img=f"{SITE_BASE}/assets/hero-tools.webp",
-        hero_sub=f"{shown}+ tools your AI can run on your WordPress site - all on every plan.",
+        hero_sub=f"{shown}+ tools your AI can run on your WordPress site. Free plan is read-only SEO; paid plans unlock the rest.",
         keywords="wordpress ai tools, wptaskify tools list, ai wordpress tool list, what can ai do on wordpress, claude wordpress tools, chatgpt wordpress tools")
 
 
@@ -4360,7 +4378,7 @@ def _plan_section(plan, account, toolcall_account, token_account,
 
 <div class=panel>
   <h2>All plans</h2>
-  <p class=hint>Every plan includes all {TOTAL_TOOLS}+ tools. Bring your own Claude or ChatGPT - no extra AI subscription.
+  <p class=hint>Free is read-only SEO; paid plans unlock the full {TOTAL_TOOLS}+ toolset (Pro adds Studio). Bring your own Claude or ChatGPT - no extra AI subscription.
   Have a discount code? Pick a plan below - you can apply it on the next step.</p>
   <div class="plan-grid {cols}">{cards}</div>
 </div>
