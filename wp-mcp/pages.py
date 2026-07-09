@@ -3082,12 +3082,12 @@ def pricing_page(country="", show_welcome=True):
                 _fs = f"{_first:,.0f}" if is_india else f"{_first:,.2f}".rstrip("0").rstrip(".")
             except (TypeError, ValueError):
                 _fs = ""
-            promo_badge = f'<div class=promo-badge>{wpct}% OFF 1st month</div>'
+            promo_badge = f'<div class=promo-badge>Save {wpct}%</div>'
             if _fs:
                 price_block = (
-                    f'<div class=amt><span class=amt-was>{amt}</span> {cur}{_fs}'
-                    f'<span>1st mo</span></div>'
-                    f'<p class=amt-then>then {amt}/mo &middot; new customers</p>')
+                    f'<div class=amt>{cur}{_fs}<span>first month</span></div>'
+                    f'<p class=amt-then><s>{amt}</s> &rarr; {cur}{_fs} first month, '
+                    f'then {amt}/mo</p>')
         cards += (
             f'<div class="{cls}">{tag}{promo_badge}<h3>{name}</h3>'
             f'<p class=price-who>{who}</p>'
@@ -3219,12 +3219,12 @@ def pricing_page(country="", show_welcome=True):
 .prices .price h3{{margin-bottom:2px}}
 .price-who{{color:#8A8792;font-size:.9rem;margin:0 0 16px;min-height:1.2em}}
 .prices .price .amt{{margin-bottom:6px}}
-/* first-month discount badge + strikethrough price */
+/* first-month discount badge + "first month" price line */
 .promo-badge{{position:absolute;top:14px;right:14px;background:#16a34a;color:#fff;
-  font-family:'Sora';font-weight:700;font-size:.68rem;letter-spacing:.02em;
-  padding:4px 9px;border-radius:999px;box-shadow:0 4px 12px -4px rgba(22,163,74,.5)}}
-.amt-was{{font-size:1.15rem;color:#B4B1BE;text-decoration:line-through;font-weight:600;margin-right:4px}}
-.amt-then{{color:#16a34a;font-size:.82rem;font-weight:600;margin:0 0 18px}}
+  font-family:'Sora';font-weight:700;font-size:.72rem;letter-spacing:.02em;
+  padding:4px 10px;border-radius:999px;box-shadow:0 4px 12px -4px rgba(22,163,74,.5)}}
+.amt-then{{color:#6B6875;font-size:.84rem;font-weight:500;margin:2px 0 16px;line-height:1.4}}
+.amt-then s{{color:#A9A6B2}}
 .prices .price .btn-block{{margin-bottom:4px}}
 .prices .price ul{{margin:20px 0 0}}
 .price-all{{display:flex;gap:8px;align-items:center;color:#5B5966;font-size:.86rem;margin:16px 0 0;
