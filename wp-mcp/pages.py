@@ -175,6 +175,11 @@ a{color:var(--accent);text-decoration:none}
 .price h3{font-size:1.2rem;margin-bottom:6px}
 .price .amt{font-family:'Sora';font-size:2.3rem;font-weight:700;color:var(--fg);line-height:1}
 .price .amt span{font-size:1rem;color:var(--muted);font-weight:500}
+.price .promo-badge{position:absolute;top:14px;right:14px;background:#16a34a;color:#fff;
+  font-family:'Sora';font-weight:700;font-size:.72rem;letter-spacing:.02em;padding:4px 10px;
+  border-radius:999px;box-shadow:0 4px 12px -4px rgba(22,163,74,.5)}
+.price .amt-then{color:var(--muted);font-size:.82rem;font-weight:500;margin:6px 0 0;line-height:1.4}
+.price .amt-then s{opacity:.7}
 .price ul{list-style:none;padding:0;margin:22px 0;flex:1}
 .price li{display:flex;gap:9px;align-items:flex-start;padding:6px 0;color:var(--muted);font-size:.9rem}
 .price li svg{color:var(--accent);flex-shrink:0;margin-top:3px}
@@ -1163,6 +1168,9 @@ def landing(logged_in=False, country=""):
           "250 AI images", "Best quality, deep research"]),
     ]
 
+    # First-month welcome discount (mirrors db.WELCOME_DISCOUNT + the pricing page).
+    _home_welcome = {"owai_starter": 30, "owai_pro": 40}
+
     def _cards(plans):
         out = ""
         for i, (key, name, usd, inr, per, feat, cta, feats) in enumerate(plans):
@@ -1171,6 +1179,22 @@ def landing(logged_in=False, country=""):
             lis = "".join(f'<li>{_CHECK} {f}</li>' for f in feats)
             cls = "price feat reveal" if feat else "price reveal"
             btn = "btn-primary" if feat else "btn-ghost"
+            # First-month discount badge + price (Starter/Pro).
+            wpct = _home_welcome.get(key, 0)
+            price_block = f'<div class=amt>{amt}<span>{per}</span></div>'
+            promo_badge = ""
+            if wpct:
+                try:
+                    _raw = float((amt or "0").lstrip("₹$").replace(",", ""))
+                    _first = _raw * (100 - wpct) / 100.0
+                    _fs = f"{_first:,.0f}" if is_india else f"{_first:,.2f}".rstrip("0").rstrip(".")
+                except (TypeError, ValueError):
+                    _fs = ""
+                promo_badge = f'<div class=promo-badge>Save {wpct}%</div>'
+                if _fs:
+                    price_block = (
+                        f'<div class=amt>{cur}{_fs}<span>first month</span></div>'
+                        f'<p class=amt-then><s>{amt}</s> &rarr; {cur}{_fs} first month, then {amt}{per}</p>')
             # Logged-in + a purchasable (own-AI) plan -> review/checkout page (amount +
             # GST + coupon), not straight to Razorpay. Chat plans aren't sold online yet,
             # so send those to the dashboard. Logged-out -> signup remembering the plan.
@@ -1182,8 +1206,8 @@ def landing(logged_in=False, country=""):
                 action = f'<a href="/?signup&plan={key}" class="btn {btn} btn-block">{cta}</a>'
             else:
                 action = f'<a href="/?signup" class="btn {btn} btn-block">{cta}</a>'
-            out += (f'<div class="{cls} d{i+1}">{tag}<h3>{name}</h3>'
-                    f'<div class=amt>{amt}<span>{per}</span></div>{("<ul>"+lis+"</ul>")}'
+            out += (f'<div class="{cls} d{i+1}">{tag}{promo_badge}<h3>{name}</h3>'
+                    f'{price_block}{("<ul>"+lis+"</ul>")}'
                     f'{action}</div>')
         return out
 
