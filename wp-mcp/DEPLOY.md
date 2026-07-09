@@ -78,8 +78,8 @@ Dockerfile har `.py` file ko **explicitly** COPY karta hai:
 ```dockerfile
 COPY server.py oauth.py db.py pages.py mailer.py chat.py billing.py razorpay_pay.py admin.py blog_posts.py google_api.py start.py ./
 ```
-**Agar koi NAYI .py file banao** (jaise pehle `google_api.py` bani thi) → us line me add karna MAT bhoolo,
-warna `ModuleNotFoundError` aayega aur deploy crash. Existing file edit karo to kuch nahi karna.
+**Agar koi NAYI .py file banao** (jaise `google_api.py`, `bing_api.py` bani thi) → us line me add karna
+MAT bhoolo, warna `ModuleNotFoundError` aayega aur deploy crash. Existing file edit karo to kuch nahi karna.
 
 ---
 
