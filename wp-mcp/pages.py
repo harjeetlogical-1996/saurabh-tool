@@ -2634,9 +2634,18 @@ def blog_post_page(post):
             for r in related)
         parts.append(f'<h2>Related guides</h2><div class=blog-rel-grid>{links}</div>')
     parts.append(
-        f'<div class=blog-cta><h3>{_e_html(post.get("cta","Try wptaskify free"))}</h3>'
-        f'<p>Bring your own Claude or ChatGPT. 100+ WordPress tools. Nothing goes live without '
-        f'your approval.</p><a class="btn btn-primary btn-lg" href="/?signup">Get started free</a></div>'
+        f'<div class=blog-cta>'
+        f'<div class=blog-cta-eyebrow>WPTASKIFY</div>'
+        f'<h3>{_e_html(post.get("cta","Put your WordPress site on autopilot"))}</h3>'
+        f'<p>Bring your own Claude or ChatGPT and let AI write, optimize and publish for you.</p>'
+        f'<div class=blog-cta-pills>'
+        f'<span>{_CHECK} 100+ WordPress tools</span>'
+        f'<span>{_CHECK} Your own AI, no extra bill</span>'
+        f'<span>{_CHECK} Nothing goes live without approval</span>'
+        f'</div>'
+        f'<a class="btn btn-primary btn-lg blog-cta-btn" href="/?signup">Get started free &rarr;</a>'
+        f'<div class=blog-cta-note>Free forever plan &middot; No credit card</div>'
+        f'</div>'
         '<p class=blog-back><a href="/blog">&larr; All guides</a></p>')
     body = "".join(parts)
 
@@ -2706,10 +2715,30 @@ _BLOG_ARTICLE_CSS = """<style>
 .blog-fig img{width:100%;border-radius:14px;border:1px solid #EAE8F0;
   box-shadow:0 14px 40px -22px rgba(20,19,26,.35)}
 .blog-fig figcaption{color:#8A8792;font-size:.85rem;text-align:center;margin-top:10px}
-.blog-cta{margin:44px 0 12px;padding:30px;border-radius:18px;text-align:center;
-  background:linear-gradient(135deg,#14131A,#26232f);color:#fff}
-.blog-cta h3{font-family:'Sora';font-size:1.35rem;margin:0 0 8px;color:#fff}
-.blog-cta p{color:#C9C7D2;margin:0 0 18px}
+.blog-cta{position:relative;overflow:hidden;margin:48px 0 12px;padding:38px 32px;
+  border-radius:22px;text-align:center;color:#fff;
+  background:radial-gradient(120% 140% at 50% -20%,rgba(249,115,22,.35),transparent 60%),
+    linear-gradient(135deg,#17151d,#221f2b);
+  border:1px solid rgba(249,115,22,.28);
+  box-shadow:0 24px 60px -30px rgba(249,115,22,.5),inset 0 1px 0 rgba(255,255,255,.05)}
+.blog-cta::before{content:"";position:absolute;z-index:0;top:-60px;left:50%;transform:translateX(-50%);
+  width:360px;height:200px;background:radial-gradient(closest-side,rgba(251,191,36,.25),transparent);
+  pointer-events:none}
+.blog-cta>*{position:relative;z-index:1}
+.blog-cta-eyebrow{position:relative;font-family:'Sora';font-weight:700;font-size:.72rem;
+  letter-spacing:.22em;color:#FBBF24;margin-bottom:12px}
+.blog-cta h3{position:relative;font-family:'Sora';font-weight:800;
+  font-size:clamp(1.4rem,3.4vw,1.9rem);line-height:1.2;margin:0 0 10px;color:#fff}
+.blog-cta p{position:relative;z-index:1;color:#E6E5EE;font-size:1.02rem;max-width:46ch;margin:0 auto 20px}
+.blog-cta-btn{color:#111!important}
+.blog-cta-pills{position:relative;display:flex;flex-wrap:wrap;gap:8px;justify-content:center;
+  margin:0 auto 24px;max-width:600px}
+.blog-cta-pills span{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;
+  border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);
+  color:#E8E7EE;font-size:.85rem;font-weight:500}
+.blog-cta-pills span svg{width:15px;height:15px;color:#FBBF24;flex-shrink:0}
+.blog-cta-btn{position:relative;box-shadow:0 12px 30px -10px rgba(249,115,22,.7)}
+.blog-cta-note{position:relative;margin-top:14px;font-size:.82rem;color:#9B99A6}
 .blog-back{margin-top:26px}.blog-back a{color:#EA580C;font-weight:600}
 .blog-rel-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0 8px}
 .blog-rel{display:flex;flex-direction:column;gap:6px;padding:16px;border:1px solid #EAE8F0;
@@ -2750,9 +2779,18 @@ def blog_db_post_page(post):
             f'<span class=blog-rel-t>{_e_html(r["title"])}</span>'
             f'<span class=blog-rel-a>Read guide &rarr;</span></a>' for r in related)
         rel = f'<h2>Related guides</h2><div class=blog-rel-grid>{links}</div>'
-    cta = (f'<div class=blog-cta><h3>Put your WordPress site on autopilot</h3>'
-           f'<p>Bring your own Claude or ChatGPT. 100+ WordPress tools. Nothing goes live without '
-           f'your approval.</p><a class="btn btn-primary btn-lg" href="/?signup">Get started free</a></div>'
+    cta = (f'<div class=blog-cta>'
+           f'<div class=blog-cta-eyebrow>WPTASKIFY</div>'
+           f'<h3>Put your WordPress site on autopilot</h3>'
+           f'<p>Bring your own Claude or ChatGPT and let AI write, optimize and publish for you.</p>'
+           f'<div class=blog-cta-pills>'
+           f'<span>{_CHECK} 100+ WordPress tools</span>'
+           f'<span>{_CHECK} Your own AI, no extra bill</span>'
+           f'<span>{_CHECK} Nothing goes live without approval</span>'
+           f'</div>'
+           f'<a class="btn btn-primary btn-lg blog-cta-btn" href="/?signup">Get started free &rarr;</a>'
+           f'<div class=blog-cta-note>Free forever plan &middot; No credit card</div>'
+           f'</div>'
            f'<p class=blog-back><a href="/blog">&larr; All guides</a></p>')
     # NOTE: body_html is admin-authored trusted content (only the owner can create posts).
     body = post["body_html"] + rel + cta
