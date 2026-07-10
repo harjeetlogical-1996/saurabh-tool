@@ -369,14 +369,51 @@ def create_post(title: str, content: str, status: str = "draft", excerpt: str = 
     return json.dumps(_slim_post(_v2("POST", "/posts", payload=payload)), indent=2, ensure_ascii=False)
 
 
+def _path_of(link):
+    """Return the path (with query) of a full URL, e.g. https://x.com/old/ -> /old/.
+    Empty input -> '' (so the redirect helper skips it)."""
+    if not link:
+        return ""
+    try:
+        u = urllib.parse.urlparse(link)
+        return (u.path or "/") + (("?" + u.query) if u.query else "")
+    except Exception:
+        return ""
+
+
+def _auto_redirect(old_link, new_link):
+    """Best-effort 301 from an old URL to a new one after a slug change, using the
+    Redirection plugin. Silent no-op if the plugin isn't installed. Returns a note dict."""
+    old_path, new_path = _path_of(old_link), _path_of(new_link)
+    if not old_path or not new_path or old_path == new_path:
+        return {}
+    try:
+        _request("POST", "/redirection/v1/redirect", payload={
+            "url": old_path, "action_data": {"url": new_path}, "match_type": "url",
+            "action_type": "url", "action_code": 301, "group_id": 1, "status": "enabled",
+        })
+        return {"redirect": f"301 {old_path} -> {new_path}"}
+    except Exception:
+        return {"redirect_note": "Slug changed. Install the Redirection plugin to auto-301 "
+                                  "the old URL, or create the redirect with create_redirect."}
+
+
 @mcp.tool()
 def update_post(post_id: int, title: str = "", content: str = "", status: str = "",
                 excerpt: str = "", category_ids: str = "", tag_ids: str = "",
-                featured_media_id: int = 0, site: str = "") -> str:
+                featured_media_id: int = 0, slug: str = "", site: str = "") -> str:
     """Edit a post by ID. Only non-empty fields change. content replaces whole body (HTML).
-    Pass status='publish' to make a draft live. category_ids/tag_ids = comma-separated IDs."""
+    Pass status='publish' to make a draft live. category_ids/tag_ids = comma-separated IDs.
+    `slug` changes the post's URL - the OLD url is automatically 301-redirected to the new
+    one (needs the Redirection plugin) so rankings and links are preserved."""
     _require_tier('paid')
     _apply_site(site)
+    old_link = ""
+    if slug:
+        try:
+            old_link = (_v2("GET", f"/posts/{post_id}") or {}).get("link", "")
+        except Exception:
+            pass
     payload = {}
     if title:
         payload["title"] = title
@@ -392,9 +429,15 @@ def update_post(post_id: int, title: str = "", content: str = "", status: str = 
         payload["tags"] = [int(x) for x in tag_ids.split(",") if x.strip()]
     if featured_media_id:
         payload["featured_media"] = featured_media_id
+    if slug:
+        payload["slug"] = slug
     if not payload:
         return "Nothing to update."
-    return json.dumps(_slim_post(_v2("POST", f"/posts/{post_id}", payload=payload)), indent=2, ensure_ascii=False)
+    updated = _v2("POST", f"/posts/{post_id}", payload=payload)
+    out = _slim_post(updated)
+    if slug and old_link:
+        out.update(_auto_redirect(old_link, updated.get("link", "")))
+    return json.dumps(out, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -542,13 +585,20 @@ def create_cpt_item(post_type: str, title: str, content: str = "", status: str =
 @mcp.tool()
 def update_cpt_item(post_type: str, item_id: int, title: str = "", content: str = "",
                     status: str = "", excerpt: str = "", terms: str = "",
-                    featured_media_id: int = 0, site: str = "") -> str:
+                    featured_media_id: int = 0, slug: str = "", site: str = "") -> str:
     """Edit an item of ANY custom post type. Only non-empty fields change. `terms` =
     'taxonomy:id[,id]' to (re)assign custom-taxonomy terms (find IDs with list_taxonomies).
-    Pass status='publish' to make a draft live."""
+    Pass status='publish' to make a draft live. `slug` changes the URL and 301-redirects the
+    old one automatically (needs the Redirection plugin)."""
     _require_tier('paid')
     _apply_site(site)
     rb = _rest_base_for_type(post_type)
+    old_link = ""
+    if slug:
+        try:
+            old_link = (_request("GET", f"/wp/v2/{rb}/{item_id}") or {}).get("link", "")
+        except Exception:
+            pass
     payload = {}
     if title:
         payload["title"] = title
@@ -560,11 +610,16 @@ def update_cpt_item(post_type: str, item_id: int, title: str = "", content: str 
         payload["excerpt"] = excerpt
     if featured_media_id:
         payload["featured_media"] = featured_media_id
+    if slug:
+        payload["slug"] = slug
     _apply_terms_to_payload(payload, post_type, terms)
     if not payload:
         return "Nothing to update."
     item = _request("POST", f"/wp/v2/{rb}/{item_id}", payload=payload)
-    return json.dumps(_slim_post(item), indent=2, ensure_ascii=False)
+    out = _slim_post(item)
+    if slug and old_link:
+        out.update(_auto_redirect(old_link, item.get("link", "")))
+    return json.dumps(out, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -1056,10 +1111,19 @@ def get_page(page_id: int, site: str = "") -> str:
 
 
 @mcp.tool()
-def update_page(page_id: int, title: str = "", content: str = "", status: str = "", site: str = "") -> str:
-    """Edit a page by ID. Only non-empty fields change. content replaces whole body (HTML)."""
+def update_page(page_id: int, title: str = "", content: str = "", status: str = "",
+                slug: str = "", site: str = "") -> str:
+    """Edit a page by ID. Only non-empty fields change. content replaces whole body (HTML).
+    `slug` changes the page's URL - the OLD url is automatically 301-redirected to the new
+    one (needs the Redirection plugin) so rankings and links are preserved."""
     _require_tier('paid')
     _apply_site(site)
+    old_link = ""
+    if slug:
+        try:
+            old_link = (_v2("GET", f"/pages/{page_id}") or {}).get("link", "")
+        except Exception:
+            pass
     payload = {}
     if title:
         payload["title"] = title
@@ -1067,9 +1131,15 @@ def update_page(page_id: int, title: str = "", content: str = "", status: str = 
         payload["content"] = content
     if status:
         payload["status"] = status
+    if slug:
+        payload["slug"] = slug
     if not payload:
         return "Nothing to update."
-    return json.dumps(_slim_post(_v2("POST", f"/pages/{page_id}", payload=payload)), indent=2, ensure_ascii=False)
+    updated = _v2("POST", f"/pages/{page_id}", payload=payload)
+    out = _slim_post(updated)
+    if slug and old_link:
+        out.update(_auto_redirect(old_link, updated.get("link", "")))
+    return json.dumps(out, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
