@@ -380,6 +380,22 @@ if MULTI_TENANT:
     _threading.Thread(target=_expiry_worker, daemon=True, name="plan-expiry").start()
     print("[start] plan-expiry worker started.")
 
+    # --- Blog auto-publish: flip scheduled posts live when their time arrives ---
+    # Checks every 5 min so hourly-spaced schedules go out close to on time.
+    def _blog_publish_worker():
+        import time as _t
+        while True:
+            try:
+                pub = db.publish_due_blog_posts()
+                if pub:
+                    print(f"[blog] auto-published {len(pub)} scheduled post(s): {', '.join(pub)}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[blog] auto-publish job failed: {e}")
+            _t.sleep(5 * 60)
+
+    _threading.Thread(target=_blog_publish_worker, daemon=True, name="blog-publish").start()
+    print("[start] blog-publish worker started.")
+
 app = server.mcp.streamable_http_app()
 _inner = app
 _PORT_BYTES = str(int(os.environ["PORT"])).encode()
@@ -1194,13 +1210,14 @@ async def _handle_admin(path, method, headers, query, receive, send):
     if method == "POST" and sub == "blog/save":
         f = _form(await _read_body(receive))
         old_slug = f.get("old_slug", "").strip() or None
+        _pub_at = (f.get("publish_at", "") or "").strip() or None
         ok, res = db.blog_db_upsert(
             slug=f.get("slug", ""), title=f.get("title", ""),
             description=f.get("description", ""), keywords=f.get("keywords", ""),
             hero=f.get("hero", "hero-blog.webp").strip() or "hero-blog.webp",
             read_time=f.get("read_time", "5 min read").strip() or "5 min read",
             body_html=f.get("body_html", ""), published=(f.get("published") == "1"),
-            old_slug=old_slug)
+            old_slug=old_slug, publish_at=_pub_at)
         if ok:
             await redirect("/blog?ok=" + urllib.parse.quote("Post saved."))
         else:

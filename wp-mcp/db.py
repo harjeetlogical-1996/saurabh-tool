@@ -490,6 +490,9 @@ def _create_schema():
                 updated_at   timestamptz NOT NULL DEFAULT now()
             );
         """)
+        # Scheduled publishing: publish_at in the future keeps the post hidden until the
+        # auto-publish job flips `published` on (see publish_due_blog_posts()).
+        conn.execute("ALTER TABLE blog_posts_db ADD COLUMN IF NOT EXISTS publish_at timestamptz")
 
 
 # ---------------------------------------------------------------------------
@@ -2652,42 +2655,64 @@ def blog_db_get(slug):
 
 
 def blog_db_upsert(slug, title, description="", keywords="", hero="hero-blog.webp",
-                   read_time="5 min read", body_html="", published=True, old_slug=None):
+                   read_time="5 min read", body_html="", published=True, old_slug=None,
+                   publish_at=None):
     """Create or update a blog post. If old_slug is given (editing), update that row and
-    change its slug. Returns (ok, error)."""
+    change its slug. `publish_at` (ISO timestamp / datetime) schedules the post: if it's in
+    the future the post is stored with published=False and goes live automatically when
+    publish_due_blog_posts() runs after that time. Returns (ok, error)."""
     slug = _slugify(slug or title)
     title = (title or "").strip()
     if not title:
         return False, "Title is required."
     if not (body_html or "").strip():
         return False, "Body is required."
+    # A future publish_at means: keep it hidden (published=False) until the worker flips it.
+    if publish_at:
+        with _pool.connection() as conn:
+            future = conn.execute("SELECT %s::timestamptz > now()", (publish_at,)).fetchone()[0]
+        if future:
+            published = False
     with _pool.connection() as conn:
         try:
             if old_slug:
                 cur = conn.execute("""
                     UPDATE blog_posts_db SET slug=%s, title=%s, description=%s, keywords=%s,
-                      hero=%s, read_time=%s, body_html=%s, published=%s, updated_at=now()
+                      hero=%s, read_time=%s, body_html=%s, published=%s, publish_at=%s,
+                      updated_at=now()
                     WHERE slug=%s
                 """, (slug, title, description, keywords, hero, read_time, body_html,
-                      published, old_slug))
-                # If the old_slug matched no row (already renamed/deleted), don't lose the
-                # edit: fall through to an insert/upsert so the post is still saved.
+                      published, publish_at, old_slug))
                 if cur.rowcount == 0:
                     old_slug = None
             if not old_slug:
                 conn.execute("""
                     INSERT INTO blog_posts_db (slug, title, description, keywords, hero,
-                      read_time, body_html, published)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                      read_time, body_html, published, publish_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (slug) DO UPDATE SET
                       title=EXCLUDED.title, description=EXCLUDED.description,
                       keywords=EXCLUDED.keywords, hero=EXCLUDED.hero,
                       read_time=EXCLUDED.read_time, body_html=EXCLUDED.body_html,
-                      published=EXCLUDED.published, updated_at=now()
-                """, (slug, title, description, keywords, hero, read_time, body_html, published))
+                      published=EXCLUDED.published, publish_at=EXCLUDED.publish_at,
+                      updated_at=now()
+                """, (slug, title, description, keywords, hero, read_time, body_html,
+                      published, publish_at))
         except Exception as e:  # noqa: BLE001
             return False, f"Could not save: {str(e)[:120]}"
     return True, slug
+
+
+def publish_due_blog_posts():
+    """Auto-publish job: flip any scheduled post (published=false, publish_at<=now) live.
+    Returns the number published. Safe to run repeatedly."""
+    with _pool.connection() as conn:
+        rows = conn.execute("""
+            UPDATE blog_posts_db SET published=true, updated_at=now()
+            WHERE published=false AND publish_at IS NOT NULL AND publish_at <= now()
+            RETURNING slug
+        """).fetchall()
+    return [r[0] for r in rows]
 
 
 def blog_db_delete(slug):
