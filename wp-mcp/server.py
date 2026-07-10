@@ -407,6 +407,199 @@ def delete_post(post_id: int, permanent: bool = False, site: str = "") -> str:
 
 
 # ===========================================================================
+# CUSTOM POST TYPES (CPT) + CUSTOM TAXONOMIES
+# The tools above work on the default 'post' type. These work on ANY registered
+# post type (service, product, portfolio, ...) and its custom taxonomies - as long
+# as the type is REST-enabled (show_in_rest=true), which is required for the AI to
+# touch it. First call list_post_types to discover types + their REST base.
+# ===========================================================================
+def _rest_base_for_type(post_type):
+    """Resolve a post type slug (e.g. 'service') to its REST base (e.g. 'services').
+    Most types use rest_base = the plural, but it can be customised - so we ask WP.
+    Returns the rest_base (falls back to the slug itself)."""
+    if post_type in ("post", "page"):
+        return "posts" if post_type == "post" else "pages"
+    try:
+        t = _v2("GET", f"/types/{post_type}", params={"context": "edit"})
+        rb = t.get("rest_base") or post_type
+        return rb
+    except Exception:
+        return post_type
+
+
+def _tax_rest_bases(post_type):
+    """Return {taxonomy_slug: rest_base} for the taxonomies attached to a post type,
+    so we know which REST field to send term ids under (e.g. service_hub -> 'service_hub')."""
+    out = {}
+    try:
+        taxes = _v2("GET", "/taxonomies", params={"type": post_type, "context": "edit"})
+        for slug, t in (taxes or {}).items():
+            out[slug] = t.get("rest_base") or slug
+    except Exception:
+        pass
+    return out
+
+
+@mcp.tool()
+def list_post_types(site: str = "") -> str:
+    """List every REST-enabled post type on the site (built-in AND custom, e.g. 'service',
+    'product', 'portfolio') with its slug, label, and REST base. Use this FIRST to discover
+    custom post types before creating/editing their items with the *_cpt_item tools."""
+    _require_tier('paid')
+    _apply_site(site)
+    types = _v2("GET", "/types", params={"context": "edit"})
+    out = []
+    for slug, t in (types or {}).items():
+        out.append({
+            "slug": slug,
+            "name": t.get("name", ""),
+            "rest_base": t.get("rest_base") or slug,
+            "hierarchical": t.get("hierarchical", False),
+            "taxonomies": t.get("taxonomies", []),
+            "viewable": t.get("viewable", None),
+        })
+    return json.dumps({"post_types": out}, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def list_taxonomies(post_type: str = "", include_terms: bool = True, site: str = "") -> str:
+    """List the taxonomies (categories/tags AND custom ones like 'service_hub') on the
+    site, optionally filtered to a post_type, with their REST base and (if include_terms)
+    their terms + term IDs. Use this to find the term IDs to assign when creating a custom
+    post-type item."""
+    _require_tier('paid')
+    _apply_site(site)
+    params = {"context": "edit"}
+    if post_type:
+        params["type"] = post_type
+    taxes = _v2("GET", "/taxonomies", params=params)
+    out = []
+    for slug, t in (taxes or {}).items():
+        rb = t.get("rest_base") or slug
+        entry = {"slug": slug, "name": t.get("name", ""), "rest_base": rb,
+                 "hierarchical": t.get("hierarchical", False),
+                 "types": t.get("types", [])}
+        if include_terms:
+            try:
+                terms = _v2("GET", f"/{rb}", params={"per_page": 100, "context": "edit"})
+                entry["terms"] = [{"id": x.get("id"), "name": x.get("name"),
+                                   "slug": x.get("slug"), "count": x.get("count"),
+                                   "parent": x.get("parent")} for x in (terms or [])]
+            except Exception as e:  # noqa: BLE001
+                entry["terms_error"] = str(e)[:100]
+        out.append(entry)
+    return json.dumps({"taxonomies": out}, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def list_cpt_items(post_type: str, search: str = "", status: str = "publish,draft",
+                   per_page: int = 15, page: int = 1, site: str = "") -> str:
+    """List items of ANY custom post type (e.g. post_type='service'). Returns id, title,
+    status, link, slug + any taxonomy term ids. Use list_post_types first to find the
+    post_type slug."""
+    _require_tier('paid')
+    _apply_site(site)
+    rb = _rest_base_for_type(post_type)
+    params = {"per_page": per_page, "page": page, "status": status, "context": "edit"}
+    if search:
+        params["search"] = search
+    items = _request("GET", f"/wp/v2/{rb}", params=params)
+    tax_bases = list(_tax_rest_bases(post_type).values())
+    out = []
+    for p in (items or []):
+        row = _slim_post(p)
+        # include custom-taxonomy term ids (they appear as top-level arrays on the item)
+        for tb in tax_bases:
+            if tb in p and tb not in ("categories", "tags"):
+                row[tb] = p.get(tb)
+        out.append(row)
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def create_cpt_item(post_type: str, title: str, content: str = "", status: str = "draft",
+                    excerpt: str = "", terms: str = "", featured_media_id: int = 0,
+                    site: str = "") -> str:
+    """Create an item in ANY custom post type (e.g. post_type='service'). content is HTML.
+    `terms` assigns custom-taxonomy terms as 'taxonomy:id[,id];taxonomy2:id' - e.g.
+    'service_hub:12' puts it in the 'lessons' hub (find IDs with list_taxonomies).
+    Use list_post_types to get the post_type slug first."""
+    _require_tier('paid')
+    _apply_site(site)
+    rb = _rest_base_for_type(post_type)
+    payload = {"title": title, "status": status}
+    if content:
+        payload["content"] = content
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if featured_media_id:
+        payload["featured_media"] = featured_media_id
+    _apply_terms_to_payload(payload, post_type, terms)
+    item = _request("POST", f"/wp/v2/{rb}", payload=payload)
+    return json.dumps(_slim_post(item), indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_cpt_item(post_type: str, item_id: int, title: str = "", content: str = "",
+                    status: str = "", excerpt: str = "", terms: str = "",
+                    featured_media_id: int = 0, site: str = "") -> str:
+    """Edit an item of ANY custom post type. Only non-empty fields change. `terms` =
+    'taxonomy:id[,id]' to (re)assign custom-taxonomy terms (find IDs with list_taxonomies).
+    Pass status='publish' to make a draft live."""
+    _require_tier('paid')
+    _apply_site(site)
+    rb = _rest_base_for_type(post_type)
+    payload = {}
+    if title:
+        payload["title"] = title
+    if content:
+        payload["content"] = content
+    if status:
+        payload["status"] = status
+    if excerpt:
+        payload["excerpt"] = excerpt
+    if featured_media_id:
+        payload["featured_media"] = featured_media_id
+    _apply_terms_to_payload(payload, post_type, terms)
+    if not payload:
+        return "Nothing to update."
+    item = _request("POST", f"/wp/v2/{rb}/{item_id}", payload=payload)
+    return json.dumps(_slim_post(item), indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_cpt_item(post_type: str, item_id: int, permanent: bool = False, site: str = "") -> str:
+    """Delete an item of ANY custom post type. Default = Trash (recoverable).
+    permanent=True deletes forever."""
+    _require_tier('paid')
+    _apply_site(site)
+    rb = _rest_base_for_type(post_type)
+    _request("DELETE", f"/wp/v2/{rb}/{item_id}",
+             params={"force": "true"} if permanent else None)
+    return json.dumps({"post_type": post_type, "id": item_id,
+                       "result": "deleted" if permanent else "trashed"})
+
+
+def _apply_terms_to_payload(payload, post_type, terms):
+    """Parse a 'taxonomy:id[,id];tax2:id' string and add each taxonomy's term-id list to
+    the REST payload under the taxonomy's rest_base."""
+    if not terms:
+        return
+    tax_bases = _tax_rest_bases(post_type)
+    for chunk in terms.split(";"):
+        chunk = chunk.strip()
+        if not chunk or ":" not in chunk:
+            continue
+        tax, ids = chunk.split(":", 1)
+        tax = tax.strip()
+        rb = tax_bases.get(tax, tax)   # rest_base if known, else the slug
+        try:
+            payload[rb] = [int(x) for x in ids.split(",") if x.strip()]
+        except ValueError:
+            continue
+
+
+# ===========================================================================
 # BULK FIND & REPLACE
 # ===========================================================================
 @mcp.tool()
