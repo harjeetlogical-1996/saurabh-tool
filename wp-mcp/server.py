@@ -1317,6 +1317,92 @@ def update_settings(title: str = "", tagline: str = "", timezone: str = "", site
                        "timezone": s.get("timezone_string")}, ensure_ascii=False)
 
 
+def _resolve_media_id(image, filename_hint):
+    """Turn `image` (a media id, or an image URL) into a WP media id. Uploads the image
+    if a URL is given. Returns (media_id, source_url)."""
+    val = str(image).strip()
+    # Already a numeric media id? (validate it exists)
+    if val.isdigit():
+        mid = int(val)
+        try:
+            m = _v2("GET", f"/media/{mid}")
+            return mid, m.get("source_url", "")
+        except Exception:  # noqa: BLE001
+            raise RuntimeError(f"No media item with id {mid} on this site.")
+    # Treat as a URL -> download + upload.
+    url = val
+    if not url.startswith("http"):
+        raise RuntimeError("Provide an image URL (https://...) or an existing media id.")
+    with urllib.request.urlopen(url, timeout=120) as r:
+        data = r.read()
+        ctype = r.headers.get("Content-Type", "image/png")
+    fn = filename_hint or (os.path.basename(urllib.parse.urlparse(url).path) or "brand")
+    if "." not in fn:
+        fn += (mimetypes.guess_extension(ctype) or ".png")
+    media = _request("POST", "/wp/v2/media", raw_body=data, extra_headers={
+        "Content-Type": ctype,
+        "Content-Disposition": f'attachment; filename="{fn}"',
+    })
+    return media["id"], media.get("source_url", "")
+
+
+@mcp.tool()
+def set_site_icon(image: str, site: str = "") -> str:
+    """Set the site's FAVICON (browser-tab / bookmark icon, aka Site Icon). `image` is
+    either a public image URL (it gets uploaded) or an existing media id. WordPress wants
+    a square image at least 512x512. Works on any theme (it's a core setting)."""
+    _require_tier('paid')
+    _apply_site(site)
+    mid, src = _resolve_media_id(image, "site-icon")
+    # site_icon is a core WP setting (media id) - exposed on /wp/v2/settings (WP 5.9+).
+    try:
+        s = _v2("POST", "/settings", payload={"site_icon": mid})
+        set_icon = s.get("site_icon")
+    except Exception:
+        # Fallback: some sites expose it only as an option (needs Studio).
+        try:
+            _request("POST", "/wpps/v1/option", payload={"key": "site_icon", "value": str(mid)})
+            set_icon = mid
+        except Exception as e:  # noqa: BLE001
+            return json.dumps({"error": f"Could not set the favicon: {str(e)[:150]}",
+                               "media_id": mid, "image_url": src})
+    return json.dumps({"favicon_set": True, "media_id": mid, "image_url": src,
+                       "site_icon": set_icon}, ensure_ascii=False)
+
+
+@mcp.tool()
+def set_site_logo(image: str, site: str = "") -> str:
+    """Set the site's LOGO (the custom logo shown in the header by themes that support it).
+    `image` is a public image URL (uploaded) or an existing media id. Uses the core Site
+    Logo setting (works on block themes and classic themes with logo support). If the theme
+    doesn't support a logo, it's stored but may not display - use set_site_icon for the
+    favicon, which every theme shows."""
+    _require_tier('paid')
+    _apply_site(site)
+    mid, src = _resolve_media_id(image, "site-logo")
+    results = {}
+    # 1) Core Site Logo setting (WP 5.8+; block themes + classic themes with logo support).
+    try:
+        s = _v2("POST", "/settings", payload={"site_logo": mid})
+        results["site_logo"] = s.get("site_logo", mid)
+    except Exception as e:  # noqa: BLE001
+        results["site_logo_error"] = str(e)[:120]
+    # 2) Classic themes store the logo as the `custom_logo` theme mod. Set it via Studio
+    #    (theme mods aren't a plain option), best-effort.
+    try:
+        _request("POST", "/wpps/v1/option",
+                 payload={"key": "theme_mods_custom_logo", "value": str(mid), "theme_mod": True})
+        results["custom_logo_theme_mod"] = mid
+    except Exception:
+        pass
+    ok = bool(results.get("site_logo") or results.get("custom_logo_theme_mod"))
+    return json.dumps({"logo_set": ok, "media_id": mid, "image_url": src, **results,
+                       "note": ("If the logo doesn't show, your theme may set it under "
+                                "Appearance > Customize > Site Identity - the media is "
+                                "uploaded (media_id above) and ready to pick there.")},
+                      ensure_ascii=False)
+
+
 # ===========================================================================
 # SEO / CONTENT POWER TOOLS
 # ===========================================================================
