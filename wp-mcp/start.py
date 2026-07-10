@@ -2127,6 +2127,65 @@ async def asgi_app(scope, receive, send):
             await _send_html(send, 302, "", [(b"location", b"/dashboard?ok=Bing+disconnected#analytics")])
             return
 
+        # ----- Amazon affiliate (tag + optional PA-API keys) -----
+        if path == "/amazon/connect" and method == "POST":
+            uid = _get_active_uid(headers)
+            if not uid:
+                await _send_html(send, 302, "", [(b"location", b"/login")])
+                return
+            f = _form(await _read_body(receive))
+            if not _csrf_ok(headers, f):
+                await _send_html(send, 302, "", [(b"location",
+                    b"/dashboard?err=Session+expired,+please+retry#analytics")])
+                return
+            import amazon_api as _amz
+            tag = (f.get("assoc_tag", "") or "").strip()
+            region = (f.get("region", "com") or "com").strip().lower()
+            access = (f.get("access_key", "") or "").strip()
+            secret = (f.get("secret_key", "") or "").strip()
+            _asite = _safe_uuid(f.get("site_id", "")) or None
+            # Validate tag + region.
+            if not re.match(r"^[A-Za-z0-9][A-Za-z0-9-]{1,40}$", tag):
+                await _send_html(send, 302, "", [(b"location",
+                    b"/dashboard?err=Enter+a+valid+Amazon+associate+tag+(e.g.+yoursite-21)#analytics")])
+                return
+            if not _amz.region_ok(region):
+                await _send_html(send, 302, "", [(b"location",
+                    b"/dashboard?err=Pick+a+valid+Amazon+region#analytics")])
+                return
+            # If BOTH keys are given, validate them with a test PA-API search before saving.
+            if access and secret:
+                try:
+                    ok, verr = _amz.verify_keys(access, secret, tag, region)
+                except Exception as e:  # noqa: BLE001
+                    ok, verr = False, str(e)[:150]
+                if not ok:
+                    _msg = urllib.parse.quote((verr or "PA-API keys could not be verified.")[:150])
+                    await _send_html(send, 302, "", [(b"location",
+                        (f"/dashboard?err={_msg}#analytics").encode())])
+                    return
+            db.save_amazon_account(uid, tag, region=region, access_key=access,
+                                   secret_key=secret, site_id=_asite)
+            _ok = ("Amazon+connected+(full+mode)" if (access and secret)
+                   else "Amazon+tag+saved+(search-link+mode)")
+            await _send_html(send, 302, "", [(b"location",
+                (f"/dashboard?ok={_ok}#analytics").encode())])
+            return
+
+        if path == "/amazon/disconnect" and method == "POST":
+            uid = _get_active_uid(headers)
+            if not uid:
+                await _send_html(send, 401, "Not logged in")
+                return
+            f = _form(await _read_body(receive))
+            if not _csrf_ok(headers, f):
+                await _send_html(send, 403, "Bad CSRF token")
+                return
+            _asite = _safe_uuid(f.get("site_id", "")) or None
+            db.delete_amazon_account(uid, site_id=_asite)
+            await _send_html(send, 302, "", [(b"location", b"/dashboard?ok=Amazon+disconnected#analytics")])
+            return
+
         if path == "/signup" and method == "POST":
             f = _form(await _read_body(receive))
             nxt = f.get("next", "")
@@ -2416,6 +2475,7 @@ async def asgi_app(scope, receive, send):
                 except Exception as _e:  # noqa: BLE001
                     google_opts[_key] = {"properties": [], "sites": [], "error": str(_e)[:120]}
             bing_all = db.list_bing_accounts(uid)
+            amazon_all = db.list_amazon_accounts(uid)
             await _send_html(send, 200, pages.dashboard(
                 sites, PUBLIC_URL, account, flash, ok, email=email_addr, verified=verified,
                 token_account=token_acct, toolcall_account=toolcall_acct,
@@ -2423,7 +2483,8 @@ async def asgi_app(scope, receive, send):
                 country=_country, txns=txns, usage=usage, profile=profile,
                 csrf=_csrf_token(uid), affiliate=affiliate,
                 google=google_acct, google_configured=google_api.configured(),
-                google_all=google_all, google_opts=google_opts, bing_all=bing_all))
+                google_all=google_all, google_opts=google_opts, bing_all=bing_all,
+                amazon_all=amazon_all))
             return
         # ----- Affiliate: save payout method + request payout -----
         if path == "/affiliate/payout-method" and method == "POST":

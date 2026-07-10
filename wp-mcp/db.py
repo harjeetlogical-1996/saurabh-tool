@@ -293,6 +293,24 @@ def _create_schema():
         """)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_bing_user_site "
                      "ON bing_accounts (user_id, COALESCE(site_id, '00000000-0000-0000-0000-000000000000'::uuid));")
+        # ----- Amazon affiliate / PA-API (per (user, site)) -----
+        # assoc_tag + region alone enable the fallback search-links (no keys needed).
+        # access_key + secret_key (encrypted) unlock real product data + images via PA-API.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS amazon_accounts (
+                user_id          uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                site_id          uuid REFERENCES wordpress_sites(id) ON DELETE CASCADE,
+                assoc_tag        text NOT NULL DEFAULT '',
+                region           text NOT NULL DEFAULT 'com',
+                access_key_enc   bytea,
+                access_key_nonce bytea,
+                secret_key_enc   bytea,
+                secret_key_nonce bytea,
+                connected_at     timestamptz NOT NULL DEFAULT now()
+            );
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_amazon_user_site "
+                     "ON amazon_accounts (user_id, COALESCE(site_id, '00000000-0000-0000-0000-000000000000'::uuid));")
         # AI SEO score history - powers the weekly report card (before -> after).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS score_snapshots (
@@ -1114,6 +1132,108 @@ def list_bing_accounts(user_id: str):
             (user_id,)).fetchall()
     return [{"site_id": str(r[0]) if r[0] else None, "bing_site": r[1],
              "site_url": r[2] or "(account default)"} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Amazon affiliate / PA-API (per (user, site)) - mirrors the Bing helpers.
+# assoc_tag + region work alone (fallback search-links); access/secret keys are
+# optional and unlock PA-API (real product data + images).
+# ---------------------------------------------------------------------------
+def save_amazon_account(user_id: str, assoc_tag: str, region: str = "com",
+                        access_key: str = "", secret_key: str = "", site_id: str = None):
+    """Upsert Amazon config for (user, site). Keys are encrypted; pass empty strings to
+    store tag/region only (fallback mode). Passing a key of "" clears that key."""
+    ak_ct = ak_n = sk_ct = sk_n = None
+    if access_key:
+        ak_ct, ak_n = encrypt_secret(access_key.strip())
+    if secret_key:
+        sk_ct, sk_n = encrypt_secret(secret_key.strip())
+    sid = site_id or None
+    with _pool.connection() as conn:
+        updated = conn.execute(
+            """UPDATE amazon_accounts
+               SET assoc_tag=%s, region=%s,
+                   access_key_enc=COALESCE(%s, access_key_enc),
+                   access_key_nonce=COALESCE(%s, access_key_nonce),
+                   secret_key_enc=COALESCE(%s, secret_key_enc),
+                   secret_key_nonce=COALESCE(%s, secret_key_nonce),
+                   connected_at=now()
+               WHERE user_id=%s AND COALESCE(site_id,%s::uuid)=COALESCE(%s::uuid,%s::uuid)""",
+            (assoc_tag or "", region or "com", ak_ct, ak_n, sk_ct, sk_n,
+             user_id, _G_SENTINEL, sid, _G_SENTINEL),
+        ).rowcount
+        if not updated:
+            conn.execute(
+                """INSERT INTO amazon_accounts
+                   (user_id, site_id, assoc_tag, region, access_key_enc, access_key_nonce,
+                    secret_key_enc, secret_key_nonce)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (user_id, sid, assoc_tag or "", region or "com", ak_ct, ak_n, sk_ct, sk_n),
+            )
+
+
+def _amazon_row(conn, user_id, site_id, cols):
+    sid = site_id or None
+    if sid:
+        row = conn.execute(
+            f"SELECT {cols} FROM amazon_accounts WHERE user_id=%s AND site_id=%s",
+            (user_id, sid)).fetchone()
+        if row:
+            return row
+    return conn.execute(
+        f"SELECT {cols} FROM amazon_accounts WHERE user_id=%s AND site_id IS NULL",
+        (user_id,)).fetchone()
+
+
+def get_amazon_creds(user_id: str, site_id: str = None):
+    """Return {tag, region, access, secret, has_keys} for this user/site, or None if no
+    Amazon config at all. access/secret are '' when keys aren't set (fallback mode)."""
+    with _pool.connection() as conn:
+        row = _amazon_row(conn, user_id, site_id,
+                          "assoc_tag, region, access_key_enc, access_key_nonce, "
+                          "secret_key_enc, secret_key_nonce")
+    if not row:
+        return None
+    access = decrypt_secret(row[2], row[3]) if row[2] is not None else ""
+    secret = decrypt_secret(row[4], row[5]) if row[4] is not None else ""
+    return {"tag": row[0] or "", "region": row[1] or "com",
+            "access": access, "secret": secret,
+            "has_keys": bool(access and secret)}
+
+
+def get_amazon_account(user_id: str, site_id: str = None):
+    """Lightweight status (no secret decryption): {connected, tag, region, has_keys}."""
+    with _pool.connection() as conn:
+        row = _amazon_row(conn, user_id, site_id,
+                          "assoc_tag, region, (access_key_enc IS NOT NULL AND secret_key_enc IS NOT NULL)")
+    if not row:
+        return {"connected": False, "tag": "", "region": "com", "has_keys": False}
+    return {"connected": bool(row[0]), "tag": row[0] or "", "region": row[1] or "com",
+            "has_keys": bool(row[2])}
+
+
+def delete_amazon_account(user_id: str, site_id: str = None):
+    sid = site_id or None
+    with _pool.connection() as conn:
+        if sid:
+            conn.execute("DELETE FROM amazon_accounts WHERE user_id=%s AND site_id=%s",
+                         (user_id, sid))
+        else:
+            conn.execute("DELETE FROM amazon_accounts WHERE user_id=%s AND site_id IS NULL",
+                         (user_id,))
+
+
+def list_amazon_accounts(user_id: str):
+    with _pool.connection() as conn:
+        rows = conn.execute(
+            """SELECT a.site_id, a.assoc_tag, a.region,
+                      (a.access_key_enc IS NOT NULL AND a.secret_key_enc IS NOT NULL), s.site_url
+               FROM amazon_accounts a
+               LEFT JOIN wordpress_sites s ON s.id = a.site_id
+               WHERE a.user_id = %s ORDER BY a.connected_at DESC""",
+            (user_id,)).fetchall()
+    return [{"site_id": str(r[0]) if r[0] else None, "tag": r[1], "region": r[2],
+             "has_keys": bool(r[3]), "site_url": r[4] or "(account default)"} for r in rows]
 
 
 # ---------------------------------------------------------------------------

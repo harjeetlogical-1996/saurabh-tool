@@ -4496,6 +4496,92 @@ def _google_conn_card(title, subtitle, conn, public_url, csrf, site_id="", opts=
         f'</div>')
 
 
+def _amazon_section(csrf="", amazon_all=None):
+    """Amazon affiliate connect card. Associate tag + region (enables search-links); optional
+    PA-API keys unlock real product data + images. Mirrors the Bing card."""
+    amazon_all = amazon_all or []
+    connected = [a for a in amazon_all if a and a.get("tag")]
+    _regions = [("com", "United States (.com)"), ("in", "India (.in)"),
+                ("co.uk", "United Kingdom (.co.uk)"), ("ca", "Canada (.ca)"),
+                ("de", "Germany (.de)"), ("com.au", "Australia (.com.au)"),
+                ("fr", "France (.fr)"), ("es", "Spain (.es)"), ("it", "Italy (.it)"),
+                ("co.jp", "Japan (.co.jp)")]
+    if connected:
+        rows = ""
+        for a in connected:
+            tag = _e_html(a.get("tag") or "")
+            region = _e_html(a.get("region") or "com")
+            mode = ("Full mode - real product data + images" if a.get("has_keys")
+                    else "Search-link mode - add PA-API keys for real product data")
+            sid = a.get("site_id") or ""
+            rows += (
+                f'<div class=gconn>'
+                f'<div><div class=glbl>{_CHECK} Connected</div>'
+                f'<div class=hint style="margin-top:2px">Tag: <strong>{tag}</strong> '
+                f'&middot; Region: <strong>{region}</strong></div>'
+                f'<div class=hint style="margin-top:2px">{mode}</div></div>'
+                f'<form method=post action=/amazon/disconnect style=margin:0>'
+                f'<input type=hidden name=csrf value="{_e_html(csrf)}">'
+                f'<input type=hidden name=site_id value="{_e_html(sid)}">'
+                f'<button class="btn btn-ghost mini" type=submit>Disconnect</button></form>'
+                f'</div>')
+        # Allow re-adding PA-API keys / changing tag below the connected row.
+        cur_tag = _e_html(connected[0].get("tag") or "")
+        cur_region = connected[0].get("region") or "com"
+        opts = "".join(
+            f'<option value="{v}"{" selected" if v==cur_region else ""}>{_e_html(lbl)}</option>'
+            for v, lbl in _regions)
+        form = _amazon_form(csrf, cur_tag, opts, edit=True)
+        inner = rows + form
+    else:
+        opts = "".join(f'<option value="{v}">{_e_html(lbl)}</option>' for v, lbl in _regions)
+        inner = (
+            '<p class=hint>Let your AI build Amazon product-review cards in your posts and add '
+            'affiliate links. Just your <b>Associate tag</b> enables tagged search links + '
+            'AI-generated images. Add <b>PA-API keys</b> too for real product titles, prices, '
+            'ratings and photos.</p>'
+            + _amazon_form(csrf, "", opts, edit=False))
+    return f"""
+<div class=panel>
+  <h2>Amazon Affiliate</h2>
+  {inner}
+</div>
+<style>
+.amz-form{{margin-top:8px}}
+.amz-form label{{display:block;font-size:.82rem;font-weight:600;margin:8px 0 4px;color:var(--fg)}}
+.amz-form input,.amz-form select{{width:100%;padding:11px 14px;border:1px solid var(--border-hi);
+  border-radius:10px;background:var(--surface2);color:var(--fg)}}
+.amz-keys{{margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)}}
+</style>"""
+
+
+def _amazon_form(csrf, tag_val, region_opts, edit=False):
+    """The connect/edit form: tag + region + optional PA-API keys."""
+    heading = ("Update Amazon settings" if edit else "")
+    h = f'<div class=glbl style="margin-top:12px">{heading}</div>' if heading else ""
+    return (
+        f'{h}<form method=post action=/amazon/connect class=amz-form>'
+        f'<input type=hidden name=csrf value="{_e_html(csrf)}">'
+        f'<label for=atag>Amazon Associate tag</label>'
+        f'<input id=atag name=assoc_tag type=text autocomplete=off value="{_e_html(tag_val)}" '
+        f'placeholder="e.g. yoursite-21" required>'
+        f'<label for=aregion>Amazon region</label>'
+        f'<select id=aregion name=region>{region_opts}</select>'
+        f'<div class=amz-keys>'
+        f'<label for=aak>PA-API Access key <span class=hint>(optional - for real product data)</span></label>'
+        f'<input id=aak name=access_key type=text autocomplete=off placeholder="Leave blank to keep search-link mode">'
+        f'<label for=ask>PA-API Secret key <span class=hint>(optional)</span></label>'
+        f'<input id=ask name=secret_key type=password autocomplete=new-password placeholder="Leave blank to keep search-link mode">'
+        f'<p class=hint style="margin:6px 0 10px">Get your tag from '
+        f'<a href="https://affiliate-program.amazon.com" target=_blank rel=noopener>Amazon '
+        f'Associates</a>. PA-API keys come from Associates &rarr; Tools &rarr; Product '
+        f'Advertising API (needs 3 qualifying sales). '
+        f'<b>Remember to add an affiliate disclosure to your site.</b></p>'
+        f'</div>'
+        f'<button class="btn btn-primary" type=submit>{"Save" if edit else "Connect Amazon"}</button>'
+        f'</form>')
+
+
 def _bing_section(csrf="", bing_all=None):
     """Bing Webmaster Tools connect card (API-key based). Mirrors the Google card but
     simpler: paste one API key. Shows connected sites, disconnect, and how to get a key."""
@@ -4836,13 +4922,14 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
               token_account=None, chat_enabled=True, toolcall_account=None,
               country="", txns=None, usage=None, profile=None, csrf="", affiliate=None,
               google=None, google_configured=True, google_all=None, google_opts=None,
-              bing_all=None):
+              bing_all=None, amazon_all=None):
     connect = f"{public_url}/mcp" if public_url else "(set PUBLIC_URL)"
     settings_html = _settings_section(profile or {"email": email, "verified": verified})
     google_html = _google_section(google or {}, public_url, csrf, google_configured,
                                   sites=sites, google_all=google_all or [],
                                   google_opts=google_opts or {})
     google_html += _bing_section(csrf, bing_all or [])
+    google_html += _amazon_section(csrf, amazon_all or [])
     affiliate_html = _affiliate_section(affiliate or {}, public_url, csrf, verified)
     plugin_url = f"{public_url}/plugin/wp-pilot-seo.zip" if public_url else "/plugin/wp-pilot-seo.zip"
     account = account or {"plan": "free", "credits": 5, "has_own_key": False}

@@ -4316,6 +4316,318 @@ def bing_submit_url(url: str) -> str:
                       indent=2, ensure_ascii=False)
 
 
+# ===========================================================================
+# AMAZON AFFILIATE - find products + build product-review cards in posts.
+# Fallback mode (associate tag only): tagged Amazon SEARCH links + Gemini images.
+# Full mode (PA-API keys): real product title/price/rating/features + real images.
+# The user connects once in the dashboard (Amazon Affiliate card).
+# ===========================================================================
+_AMAZON_DISCLOSURE = ("As an Amazon Associate we earn from qualifying purchases.")
+
+
+def _amazon_cfg():
+    """Return the current site's Amazon config {tag, region, access, secret, has_keys},
+    or raise a friendly error if no associate tag is set."""
+    import db as _db
+    uid = _cfg().get("user_id")
+    if not uid:
+        raise RuntimeError("No user context for this request.")
+    sid = _current_site_id()
+    cfg = _db.get_amazon_creds(uid, site_id=sid)
+    if not cfg or not cfg.get("tag"):
+        raise RuntimeError("Amazon affiliate isn't set up for this site. Open your wptaskify "
+                           "dashboard and add your Amazon Associate tag (Connect Amazon). "
+                           "Product data + images also need PA-API keys, which are optional.")
+    return cfg
+
+
+def _stars(rating):
+    try:
+        r = float(rating)
+    except (TypeError, ValueError):
+        return ""
+    full = int(r)
+    half = 1 if (r - full) >= 0.5 else 0
+    return "★" * full + ("½" if half else "") + "☆" * (5 - full - half)
+
+
+def _product_card_html(product, media, disclosure=True):
+    """Build a clean, self-contained product-review card. `media` = list of
+    {url, alt} already uploaded to WP (real Amazon image(s) + optional Gemini image)."""
+    import html as _h
+    title = _h.escape(product.get("title") or "Product")
+    url = product.get("url") or "#"
+    price = _h.escape(product.get("price") or "")
+    rating = product.get("rating") or ""
+    count = product.get("review_count") or 0
+    feats = product.get("features") or []
+
+    imgs = ""
+    for m in media:
+        imgs += (f'<img src="{_h.escape(m["url"])}" alt="{_h.escape(m.get("alt", title))}" '
+                 f'loading="lazy" style="max-width:100%;height:auto;border-radius:10px" />')
+    imgs_block = (f'<div class="wpps-amz-media" style="display:flex;gap:10px;flex-wrap:wrap;'
+                  f'justify-content:center">{imgs}</div>') if imgs else ""
+
+    meta = []
+    if price:
+        meta.append(f'<span class="wpps-amz-price" style="font-weight:700;font-size:1.15rem">{price}</span>')
+    if rating:
+        stars = _stars(rating)
+        cnt = f' ({count:,} reviews)' if count else ''
+        meta.append(f'<span class="wpps-amz-rating" style="color:#f59e0b">{stars}</span>'
+                    f'<span style="color:#666;font-size:.9rem"> {rating}/5{cnt}</span>')
+    meta_block = f'<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:8px 0">{"".join(meta)}</div>' if meta else ""
+
+    feats_block = ""
+    if feats:
+        lis = "".join(f'<li style="margin:4px 0">{__import__("html").escape(f)}</li>' for f in feats)
+        feats_block = f'<ul style="margin:8px 0 12px;padding-left:20px">{lis}</ul>'
+
+    disc = (f'<p style="font-size:.78rem;color:#888;margin:10px 0 0">{_AMAZON_DISCLOSURE}</p>'
+            if disclosure else "")
+
+    btn = (f'<a href="{_h.escape(url)}" target="_blank" rel="nofollow sponsored noopener" '
+           f'class="wpps-amz-btn" style="display:inline-block;background:#ff9900;color:#111;'
+           f'font-weight:700;padding:11px 22px;border-radius:8px;text-decoration:none;'
+           f'margin-top:6px">View on Amazon &rarr;</a>')
+
+    return (
+        f'\n<div class="wpps-amazon-card" style="border:1px solid #e5e5e5;border-radius:14px;'
+        f'padding:20px;margin:22px 0;background:#fafafa">'
+        f'{imgs_block}'
+        f'<h3 style="margin:14px 0 4px;font-size:1.25rem">{title}</h3>'
+        f'{meta_block}{feats_block}{btn}{disc}'
+        f'</div>\n'
+    )
+
+
+def _upload_image_url_to_wp(image_url, filename, alt_text):
+    """Download a public image URL and upload to WP media. Returns {id, url}. Raises on error."""
+    with urllib.request.urlopen(image_url, timeout=120) as r:
+        data = r.read()
+        ctype = r.headers.get("Content-Type", "image/jpeg")
+    media = _request("POST", "/wp/v2/media", raw_body=data, extra_headers={
+        "Content-Type": ctype,
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    })
+    mid = media["id"]
+    if alt_text:
+        try:
+            _v2("POST", f"/media/{mid}", payload={"alt_text": alt_text})
+        except Exception:
+            pass
+    return {"id": mid, "url": media.get("source_url")}
+
+
+@mcp.tool()
+def amazon_status() -> str:
+    """Check whether Amazon affiliate is set up for the current site: associate tag, region,
+    and whether PA-API keys (for real product data + images) are connected. Use this first."""
+    import db as _db
+    uid = _cfg().get("user_id")
+    sid = _current_site_id()
+    acct = _db.get_amazon_account(uid, site_id=sid) if uid else {}
+    tag = (acct or {}).get("tag", "")
+    return json.dumps({
+        "connected": bool(tag),
+        "associate_tag": tag,
+        "region": (acct or {}).get("region", "com"),
+        "has_pa_api_keys": bool((acct or {}).get("has_keys")),
+        "mode": ("full (real product data + images)" if (acct or {}).get("has_keys")
+                 else "fallback (search links + AI images)" if tag else "not set up"),
+        "hint": ("" if tag else "Add your Amazon Associate tag in the dashboard (Connect Amazon)."),
+    }, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def amazon_find_products(keywords: str, count: int = 3, site: str = "") -> str:
+    """Find Amazon products for the given keywords so you can pick one to feature in an
+    article. With PA-API keys connected, returns REAL products (title, price, rating,
+    features, image, affiliate link). Without keys, returns a tagged Amazon SEARCH link to
+    use instead. Pass the chosen product's ASIN (or the keywords) to insert_product_card."""
+    _require_tier('paid')
+    _apply_site(site)
+    import amazon_api as _az
+    cfg = _amazon_cfg()
+    if cfg.get("has_keys"):
+        products, err = _az.search_items(cfg["access"], cfg["secret"], cfg["tag"],
+                                          cfg["region"], keywords, count=count)
+        if err:
+            # Fall back to a search link so the AI can still proceed.
+            return json.dumps({
+                "mode": "fallback", "error": err,
+                "search_url": _az.affiliate_search_url(keywords, cfg["tag"], cfg["region"]),
+                "note": "PA-API call failed; use the search_url as the affiliate link.",
+            }, indent=2, ensure_ascii=False)
+        return json.dumps({"mode": "full", "count": len(products), "products": products},
+                          indent=2, ensure_ascii=False)
+    return json.dumps({
+        "mode": "fallback",
+        "search_url": _az.affiliate_search_url(keywords, cfg["tag"], cfg["region"]),
+        "note": ("No PA-API keys connected, so real product data isn't available. Use this "
+                 "tagged search link as the affiliate link, and generate an illustrative "
+                 "image with insert_product_card (gemini_image=True)."),
+    }, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def insert_product_card(post_id: int, asin: str = "", keywords: str = "",
+                        after_text: str = "", gemini_image: bool = True,
+                        real_images: int = 1, disclosure: bool = True, site: str = "") -> str:
+    """Build a polished Amazon product-review CARD and insert it into a post - the main
+    monetization tool. It fetches the product (by ASIN, or the first match for `keywords`),
+    uploads up to `real_images` real Amazon image(s), optionally generates 1 extra polished
+    image with Gemini, and inserts a card (image(s) + title + price + rating + features +
+    'View on Amazon' affiliate button + disclosure) after `after_text` (or before the schema
+    block). Preserves the post's JSON-LD. Needs PA-API keys for real data/images; without
+    keys it still builds a card with a Gemini image + a tagged search link."""
+    _require_tier('paid')
+    _apply_site(site)
+    import amazon_api as _az
+    cfg = _amazon_cfg()
+
+    # 1. Resolve the product.
+    product = None
+    if cfg.get("has_keys"):
+        if asin:
+            items, err = _az.get_items(cfg["access"], cfg["secret"], cfg["tag"], cfg["region"], asin)
+        else:
+            items, err = _az.search_items(cfg["access"], cfg["secret"], cfg["tag"],
+                                          cfg["region"], keywords, count=1)
+        if err:
+            product = None  # fall through to fallback card
+        elif items:
+            product = items[0]
+    if not product:
+        # Fallback product: search link + keyword title, Gemini image only.
+        kw = keywords or asin or "recommended product"
+        product = {
+            "asin": asin, "title": kw.title(),
+            "url": _az.affiliate_search_url(kw, cfg["tag"], cfg["region"]),
+            "price": "", "rating": "", "review_count": 0, "features": [], "images": [],
+        }
+        gemini_image = True  # ensure the card has at least one image
+
+    # 2. Upload real Amazon image(s).
+    media = []
+    for i, img_url in enumerate((product.get("images") or [])[:max(0, int(real_images))]):
+        try:
+            up = _upload_image_url_to_wp(
+                img_url, f"amz-{post_id}-{i}.jpg", product.get("title", ""))
+            media.append({"url": up["url"], "alt": product.get("title", ""), "id": up["id"]})
+        except Exception as e:  # noqa: BLE001
+            print(f"[amazon] real image upload failed: {e}")
+
+    # 3. Optional Gemini polish image.
+    if gemini_image:
+        try:
+            prompt = (f"A clean, professional product photo of {product.get('title','the product')} "
+                      f"on a plain light studio background, e-commerce style, soft shadow, high detail.")
+            img_bytes = _gemini_generate_image(prompt)
+            g = _request("POST", "/wp/v2/media", raw_body=img_bytes, extra_headers={
+                "Content-Type": "image/png",
+                "Content-Disposition": f'attachment; filename="amz-{post_id}-ai.png"',
+            })
+            gmid = g["id"]
+            try:
+                _v2("POST", f"/media/{gmid}", payload={"alt_text": product.get("title", "")})
+            except Exception:
+                pass
+            media.append({"url": g.get("source_url"), "alt": product.get("title", ""), "id": gmid})
+        except Exception as e:  # noqa: BLE001
+            print(f"[amazon] gemini image failed: {e}")
+
+    # 4. Build the card + insert into the post (preserve schema).
+    card = _product_card_html(product, media, disclosure=disclosure)
+    p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
+    raw = (p.get("content") or {}).get("raw", "")
+    if after_text and after_text in raw:
+        idx = raw.find(after_text) + len(after_text)
+        new_raw = raw[:idx] + card + raw[idx:]
+    else:
+        m = _SCHEMA_RE.search(raw)
+        new_raw = (raw[:m.start()] + card + raw[m.start():]) if m else (raw + card)
+    _v2("POST", f"/posts/{post_id}", payload={"content": new_raw})
+
+    return json.dumps({
+        "post_id": post_id,
+        "product": {"title": product.get("title"), "asin": product.get("asin"),
+                    "price": product.get("price"), "url": product.get("url")},
+        "images_added": len(media),
+        "media_ids": [m["id"] for m in media],
+        "mode": "full" if cfg.get("has_keys") and product.get("price") else "fallback",
+        "reminder": ("Add an Amazon affiliate disclosure to your site (required by Amazon "
+                     "Associates). The card already includes a short disclosure line."),
+    }, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def bulk_amazon_links(max_per_post: int = 2, limit: int = 300, dry_run: bool = False,
+                      match_keywords: bool = True, site: str = "") -> str:
+    """Across the WHOLE site, turn natural product phrases into tagged Amazon SEARCH links
+    (affiliate). Conservative by default (2 links/post) to avoid spammy affiliate stuffing.
+    Works with just an associate tag - no PA-API keys needed. Never links text already inside
+    an <a> tag, preserves JSON-LD schema, and links each phrase at most once per post. Set
+    dry_run=True to preview. This is the lightweight complement to insert_product_card."""
+    _require_tier('paid')
+    _apply_site(site)
+    import amazon_api as _az
+    cfg = _amazon_cfg()
+    tag, region = cfg["tag"], cfg["region"]
+
+    # Product-y phrases we'll turn into affiliate search links when they appear in a post.
+    # We reuse the title-keyword extractor across the site's own posts as candidate anchors.
+    posts = list(_all_posts(status="publish", limit=limit))
+    phrases = set()
+    for p in posts:
+        title = (p.get("title") or {}).get("raw") or (p.get("title") or {}).get("rendered") or ""
+        for ph in _keyword_phrases(title, min_words=2):
+            phrases.add(ph.lower())
+    # Longest-first so more specific phrases win.
+    ordered = sorted(phrases, key=len, reverse=True)
+
+    summary = []
+    total = 0
+    for p in posts:
+        pid = p.get("id")
+        raw = (p.get("content") or {}).get("raw", "")
+        if not raw:
+            continue
+        schema_blocks = _SCHEMA_RE.findall(raw)
+        body = _SCHEMA_RE.sub("", raw)
+        added = []
+        for ph in ordered:
+            if len(added) >= max_per_post:
+                break
+            pat = _re.compile(r'(?<![\w>])(' + _re.escape(ph) + r')(?![\w<])', _re.IGNORECASE)
+            m = pat.search(body)
+            if not m:
+                continue
+            # skip if inside an existing anchor
+            pos = m.start()
+            before = body.rfind("<a", 0, pos)
+            if before != -1:
+                close = body.find("</a>", before)
+                if close != -1 and close > pos:
+                    continue
+            url = _az.affiliate_search_url(m.group(1), tag, region)
+            link = (f'<a href="{url}" target="_blank" rel="nofollow sponsored noopener">'
+                    f'{m.group(1)}</a>')
+            body = body[:m.start()] + link + body[m.end():]
+            added.append({"anchor": m.group(1), "url": url})
+        if added:
+            total += len(added)
+            if not dry_run:
+                new_raw = body + "".join(schema_blocks)
+                _v2("POST", f"/posts/{pid}", payload={"content": new_raw})
+            summary.append({"post_id": pid, "links": added})
+    return json.dumps({"mode": "PREVIEW" if dry_run else "APPLIED", "posts_touched": len(summary),
+                       "total_links": total, "items": summary,
+                       "reminder": "Add an Amazon affiliate disclosure to your site."},
+                      indent=2, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     mcp.settings.host = "0.0.0.0"
