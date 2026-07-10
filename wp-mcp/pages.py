@@ -4512,7 +4512,7 @@ def _amazon_section(csrf="", amazon_all=None):
             tag = _e_html(a.get("tag") or "")
             region = _e_html(a.get("region") or "com")
             mode = ("Full mode - real product data + images" if a.get("has_keys")
-                    else "Search-link mode - add PA-API keys for real product data")
+                    else "Search-link mode - add Creators API credentials for real product data")
             sid = a.get("site_id") or ""
             rows += (
                 f'<div class=gconn>'
@@ -4538,8 +4538,8 @@ def _amazon_section(csrf="", amazon_all=None):
         inner = (
             '<p class=hint>Let your AI build Amazon product-review cards in your posts and add '
             'affiliate links. Just your <b>Associate tag</b> enables tagged search links + '
-            'AI-generated images. Add <b>PA-API keys</b> too for real product titles, prices, '
-            'ratings and photos.</p>'
+            'AI-generated images. Add <b>Creators API credentials</b> too for real product '
+            'titles, prices and photos.</p>'
             + _amazon_form(csrf, "", opts, edit=False))
     return f"""
 <div class=panel>
@@ -4556,7 +4556,7 @@ def _amazon_section(csrf="", amazon_all=None):
 
 
 def _amazon_form(csrf, tag_val, region_opts, edit=False):
-    """The connect/edit form: tag + region + optional PA-API keys."""
+    """The connect/edit form: tag + region + optional Creators API credentials."""
     heading = ("Update Amazon settings" if edit else "")
     h = f'<div class=glbl style="margin-top:12px">{heading}</div>' if heading else ""
     return (
@@ -4568,14 +4568,14 @@ def _amazon_form(csrf, tag_val, region_opts, edit=False):
         f'<label for=aregion>Amazon region</label>'
         f'<select id=aregion name=region>{region_opts}</select>'
         f'<div class=amz-keys>'
-        f'<label for=aak>PA-API Access key <span class=hint>(optional - for real product data)</span></label>'
-        f'<input id=aak name=access_key type=text autocomplete=off placeholder="Leave blank to keep search-link mode">'
-        f'<label for=ask>PA-API Secret key <span class=hint>(optional)</span></label>'
-        f'<input id=ask name=secret_key type=password autocomplete=new-password placeholder="Leave blank to keep search-link mode">'
+        f'<label for=aak>Creators API Credential ID <span class=hint>(optional - for real product data)</span></label>'
+        f'<input id=aak name=access_key type=text autocomplete=off placeholder="amzn1.application-oa2-client...">'
+        f'<label for=ask>Creators API Credential Secret <span class=hint>(optional)</span></label>'
+        f'<input id=ask name=secret_key type=password autocomplete=new-password placeholder="amzn1.oa2-cs.v1...">'
         f'<p class=hint style="margin:6px 0 10px">Get your tag from '
         f'<a href="https://affiliate-program.amazon.com" target=_blank rel=noopener>Amazon '
-        f'Associates</a>. PA-API keys come from Associates &rarr; Tools &rarr; Product '
-        f'Advertising API (needs 3 qualifying sales). '
+        f'Associates</a>. Credentials come from Associates &rarr; Tools &rarr; '
+        f'<b>Creators API</b> (needs ~10 qualifying sales in 30 days). '
         f'<b>Remember to add an affiliate disclosure to your site.</b></p>'
         f'</div>'
         f'<button class="btn btn-primary" type=submit>{"Save" if edit else "Connect Amazon"}</button>'

@@ -2127,7 +2127,7 @@ async def asgi_app(scope, receive, send):
             await _send_html(send, 302, "", [(b"location", b"/dashboard?ok=Bing+disconnected#analytics")])
             return
 
-        # ----- Amazon affiliate (tag + optional PA-API keys) -----
+        # ----- Amazon affiliate (tag + optional Creators API credentials) -----
         if path == "/amazon/connect" and method == "POST":
             uid = _get_active_uid(headers)
             if not uid:
@@ -2153,14 +2153,14 @@ async def asgi_app(scope, receive, send):
                 await _send_html(send, 302, "", [(b"location",
                     b"/dashboard?err=Pick+a+valid+Amazon+region#analytics")])
                 return
-            # If BOTH keys are given, validate them with a test PA-API search before saving.
+            # If BOTH keys are given, validate them with a test Creators API search before saving.
             if access and secret:
                 try:
                     ok, verr = _amz.verify_keys(access, secret, tag, region)
                 except Exception as e:  # noqa: BLE001
                     ok, verr = False, str(e)[:150]
                 if not ok:
-                    _msg = urllib.parse.quote((verr or "PA-API keys could not be verified.")[:150])
+                    _msg = urllib.parse.quote((verr or "Creators API credentials could not be verified.")[:150])
                     await _send_html(send, 302, "", [(b"location",
                         (f"/dashboard?err={_msg}#analytics").encode())])
                     return

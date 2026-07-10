@@ -4319,7 +4319,7 @@ def bing_submit_url(url: str) -> str:
 # ===========================================================================
 # AMAZON AFFILIATE - find products + build product-review cards in posts.
 # Fallback mode (associate tag only): tagged Amazon SEARCH links + Gemini images.
-# Full mode (PA-API keys): real product title/price/rating/features + real images.
+# Full mode (Creators API credentials): real product title/price/rating/features + real images.
 # The user connects once in the dashboard (Amazon Affiliate card).
 # ===========================================================================
 _AMAZON_DISCLOSURE = ("As an Amazon Associate we earn from qualifying purchases.")
@@ -4337,7 +4337,7 @@ def _amazon_cfg():
     if not cfg or not cfg.get("tag"):
         raise RuntimeError("Amazon affiliate isn't set up for this site. Open your wptaskify "
                            "dashboard and add your Amazon Associate tag (Connect Amazon). "
-                           "Product data + images also need PA-API keys, which are optional.")
+                           "Product data + images also need Creators API credentials, which are optional.")
     return cfg
 
 
@@ -4423,7 +4423,7 @@ def _upload_image_url_to_wp(image_url, filename, alt_text):
 @mcp.tool()
 def amazon_status() -> str:
     """Check whether Amazon affiliate is set up for the current site: associate tag, region,
-    and whether PA-API keys (for real product data + images) are connected. Use this first."""
+    and whether Creators API credentials (for real product data + images) are connected. Use this first."""
     import db as _db
     uid = _cfg().get("user_id")
     sid = _current_site_id()
@@ -4443,9 +4443,9 @@ def amazon_status() -> str:
 @mcp.tool()
 def amazon_find_products(keywords: str, count: int = 3, site: str = "") -> str:
     """Find Amazon products for the given keywords so you can pick one to feature in an
-    article. With PA-API keys connected, returns REAL products (title, price, rating,
-    features, image, affiliate link). Without keys, returns a tagged Amazon SEARCH link to
-    use instead. Pass the chosen product's ASIN (or the keywords) to insert_product_card."""
+    article. With Creators API credentials connected, returns REAL products (title, price,
+    features, image, affiliate link). Without credentials, returns a tagged Amazon SEARCH link
+    to use instead. Pass the chosen product's ASIN (or the keywords) to insert_product_card."""
     _require_tier('paid')
     _apply_site(site)
     import amazon_api as _az
@@ -4458,14 +4458,14 @@ def amazon_find_products(keywords: str, count: int = 3, site: str = "") -> str:
             return json.dumps({
                 "mode": "fallback", "error": err,
                 "search_url": _az.affiliate_search_url(keywords, cfg["tag"], cfg["region"]),
-                "note": "PA-API call failed; use the search_url as the affiliate link.",
+                "note": "Creators API call failed; use the search_url as the affiliate link.",
             }, indent=2, ensure_ascii=False)
         return json.dumps({"mode": "full", "count": len(products), "products": products},
                           indent=2, ensure_ascii=False)
     return json.dumps({
         "mode": "fallback",
         "search_url": _az.affiliate_search_url(keywords, cfg["tag"], cfg["region"]),
-        "note": ("No PA-API keys connected, so real product data isn't available. Use this "
+        "note": ("No Creators API credentials connected, so real product data isn't available. Use this "
                  "tagged search link as the affiliate link, and generate an illustrative "
                  "image with insert_product_card (gemini_image=True)."),
     }, indent=2, ensure_ascii=False)
@@ -4478,10 +4478,10 @@ def insert_product_card(post_id: int, asin: str = "", keywords: str = "",
     """Build a polished Amazon product-review CARD and insert it into a post - the main
     monetization tool. It fetches the product (by ASIN, or the first match for `keywords`),
     uploads up to `real_images` real Amazon image(s), optionally generates 1 extra polished
-    image with Gemini, and inserts a card (image(s) + title + price + rating + features +
+    image with Gemini, and inserts a card (image(s) + title + price + features +
     'View on Amazon' affiliate button + disclosure) after `after_text` (or before the schema
-    block). Preserves the post's JSON-LD. Needs PA-API keys for real data/images; without
-    keys it still builds a card with a Gemini image + a tagged search link."""
+    block). Preserves the post's JSON-LD. Needs Creators API credentials for real data/images;
+    without them it still builds a card with a Gemini image + a tagged search link."""
     _require_tier('paid')
     _apply_site(site)
     import amazon_api as _az
@@ -4567,7 +4567,7 @@ def bulk_amazon_links(max_per_post: int = 2, limit: int = 300, dry_run: bool = F
                       match_keywords: bool = True, site: str = "") -> str:
     """Across the WHOLE site, turn natural product phrases into tagged Amazon SEARCH links
     (affiliate). Conservative by default (2 links/post) to avoid spammy affiliate stuffing.
-    Works with just an associate tag - no PA-API keys needed. Never links text already inside
+    Works with just an associate tag - no Creators API credentials needed. Never links text already inside
     an <a> tag, preserves JSON-LD schema, and links each phrase at most once per post. Set
     dry_run=True to preview. This is the lightweight complement to insert_product_card."""
     _require_tier('paid')
