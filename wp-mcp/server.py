@@ -749,6 +749,29 @@ def list_media(search: str = "", per_page: int = 10, site: str = "") -> str:
 
 
 @mcp.tool()
+def update_media(media_id: int, title: str = "", caption: str = "", description: str = "",
+                 alt_text: str = "", site: str = "") -> str:
+    """Edit a media item's metadata: title, caption, description, or alt text. Only
+    non-empty fields change. (To just set alt text on many images use fix_missing_alt_text.)"""
+    _require_tier('paid')
+    _apply_site(site)
+    payload = {}
+    if title:
+        payload["title"] = title
+    if caption:
+        payload["caption"] = caption
+    if description:
+        payload["description"] = description
+    if alt_text:
+        payload["alt_text"] = alt_text
+    if not payload:
+        return "Nothing to update."
+    m = _v2("POST", f"/media/{media_id}", payload=payload)
+    return json.dumps({"id": m.get("id"), "title": (m.get("title") or {}).get("rendered", ""),
+                       "alt_text": m.get("alt_text")}, ensure_ascii=False)
+
+
+@mcp.tool()
 def upload_media_from_url(image_url: str, filename: str = "", alt_text: str = "", site: str = "") -> str:
     """Download an image from a public URL and upload it to the WP media library.
     Returns the new media id (use it as featured_media_id when creating/updating a post)."""
@@ -974,6 +997,41 @@ def create_tag(name: str, description: str = "", site: str = "") -> str:
     return json.dumps({"id": t["id"], "name": t["name"], "slug": t["slug"]})
 
 
+@mcp.tool()
+def update_term(taxonomy: str, term_id: int, name: str = "", description: str = "",
+                slug: str = "", parent_id: int = -1, site: str = "") -> str:
+    """Rename / re-describe / re-slug / re-parent a taxonomy term. `taxonomy` is the REST
+    base: 'categories', 'tags', or a custom taxonomy's rest_base (find via list_taxonomies).
+    Only non-empty fields change. parent_id=-1 leaves parent unchanged (categories only)."""
+    _require_tier('paid')
+    _apply_site(site)
+    payload = {}
+    if name:
+        payload["name"] = name
+    if description:
+        payload["description"] = description
+    if slug:
+        payload["slug"] = slug
+    if parent_id >= 0:
+        payload["parent"] = parent_id
+    if not payload:
+        return "Nothing to update."
+    t = _v2("POST", f"/{taxonomy}/{term_id}", payload=payload)
+    return json.dumps({"id": t.get("id"), "name": t.get("name"), "slug": t.get("slug"),
+                       "parent": t.get("parent")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_term(taxonomy: str, term_id: int, site: str = "") -> str:
+    """Delete a taxonomy term (category, tag, or custom-taxonomy term). Posts keep existing
+    but lose this term. `taxonomy` = REST base ('categories'/'tags'/custom rest_base).
+    Terms are deleted permanently (WP has no term trash)."""
+    _require_tier('paid')
+    _apply_site(site)
+    _v2("DELETE", f"/{taxonomy}/{term_id}", params={"force": "true"})
+    return json.dumps({"taxonomy": taxonomy, "id": term_id, "result": "deleted"})
+
+
 # ===========================================================================
 # PAGES
 # ===========================================================================
@@ -1072,6 +1130,36 @@ def moderate_comment(comment_id: int, action: str, site: str = "") -> str:
         return "action must be: approve, hold, spam, trash, or delete"
     c = _v2("POST", f"/comments/{comment_id}", payload={"status": status_map[action]})
     return json.dumps({"id": comment_id, "status": c.get("status")})
+
+
+@mcp.tool()
+def create_comment(post_id: int, content: str, parent_id: int = 0,
+                   author_name: str = "", author_email: str = "", site: str = "") -> str:
+    """Post a comment on a post (or REPLY to another comment via parent_id). Use to answer
+    reader comments as the site. If author_name/email are omitted the comment is authored by
+    the connected account. New comments are auto-approved (posted by an admin)."""
+    _require_tier('paid')
+    _apply_site(site)
+    payload = {"post": post_id, "content": content}
+    if parent_id:
+        payload["parent"] = parent_id
+    if author_name:
+        payload["author_name"] = author_name
+    if author_email:
+        payload["author_email"] = author_email
+    c = _v2("POST", "/comments", payload=payload)
+    return json.dumps({"id": c.get("id"), "post": c.get("post"), "parent": c.get("parent"),
+                       "status": c.get("status")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_comment(comment_id: int, content: str, site: str = "") -> str:
+    """Edit the CONTENT of an existing comment (fix a typo, redact something). To change a
+    comment's status (approve/spam/trash) use moderate_comment instead."""
+    _require_tier('paid')
+    _apply_site(site)
+    c = _v2("POST", f"/comments/{comment_id}", payload={"content": content})
+    return json.dumps({"id": c.get("id"), "status": c.get("status")}, ensure_ascii=False)
 
 
 # ===========================================================================
@@ -1216,6 +1304,56 @@ def change_user_role(user_id: int, role: str, site: str = "") -> str:
     _apply_site(site)
     u = _v2("POST", f"/users/{user_id}", payload={"roles": [role]})
     return json.dumps({"id": u.get("id"), "roles": u.get("roles")})
+
+
+@mcp.tool()
+def get_user(user_id: str = "me", site: str = "") -> str:
+    """Get one user's profile (name, email, bio, url, roles). user_id='me' = the connected
+    account. Use before update_user to see current values."""
+    _require_tier('paid')
+    _apply_site(site)
+    u = _v2("GET", f"/users/{user_id}", params={"context": "edit"})
+    return json.dumps({"id": u.get("id"), "name": u.get("name"), "email": u.get("email"),
+                       "first_name": u.get("first_name"), "last_name": u.get("last_name"),
+                       "description": u.get("description"), "url": u.get("url"),
+                       "nickname": u.get("nickname"), "roles": u.get("roles"),
+                       "slug": u.get("slug")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_user(user_id: int, email: str = "", first_name: str = "", last_name: str = "",
+                name: str = "", description: str = "", url: str = "", password: str = "",
+                site: str = "") -> str:
+    """Edit a user's profile: display name, email, first/last name, bio (description),
+    website url, or password. Only non-empty fields change. Use get_user first to see
+    current values."""
+    _require_tier('paid')
+    _apply_site(site)
+    payload = {}
+    for k, v in (("email", email), ("first_name", first_name), ("last_name", last_name),
+                 ("name", name), ("description", description), ("url", url),
+                 ("password", password)):
+        if v:
+            payload[k] = v
+    if not payload:
+        return "Nothing to update."
+    u = _v2("POST", f"/users/{user_id}", payload=payload)
+    return json.dumps({"id": u.get("id"), "name": u.get("name"), "email": u.get("email")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_user(user_id: int, reassign_to: int = 0, site: str = "") -> str:
+    """Delete a user. reassign_to = the user id to reassign their posts to (recommended so
+    content isn't lost). If reassign_to=0, their content is deleted too - be careful."""
+    _require_tier('paid')
+    _apply_site(site)
+    params = {"force": "true"}
+    if reassign_to:
+        params["reassign"] = reassign_to
+    _v2("DELETE", f"/users/{user_id}", params=params)
+    return json.dumps({"id": user_id, "result": "deleted",
+                       "reassigned_to": reassign_to or None})
 
 
 @mcp.tool()
@@ -1480,6 +1618,55 @@ def delete_menu_item(item_id: int, site: str = "") -> str:
     return json.dumps({"id": item_id, "result": "removed"})
 
 
+@mcp.tool()
+def update_menu_item(item_id: int, title: str = "", url: str = "", parent_id: int = -1,
+                     menu_order: int = -1, site: str = "") -> str:
+    """Edit an existing menu item: rename, change its URL, re-nest under a parent, or
+    reorder (menu_order). Only non-empty/>=0 fields change. Use to reorder or restructure
+    a menu without deleting + re-adding items."""
+    _require_tier('paid')
+    _apply_site(site)
+    payload = {}
+    if title:
+        payload["title"] = title
+    if url:
+        payload["url"] = url
+    if parent_id >= 0:
+        payload["parent"] = parent_id
+    if menu_order >= 0:
+        payload["menu_order"] = menu_order
+    if not payload:
+        return "Nothing to update."
+    i = _v2("POST", f"/menu-items/{item_id}", payload=payload)
+    return json.dumps({"id": i.get("id"), "title": (i.get("title") or {}).get("rendered", ""),
+                       "url": i.get("url"), "order": i.get("menu_order"),
+                       "parent": i.get("parent")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def create_menu(name: str, location: str = "", site: str = "") -> str:
+    """Create a new (empty) navigation menu. Optionally assign it to a theme location
+    (e.g. 'primary' - find valid locations in list_menus output). Then use add_menu_item
+    to fill it. Returns the new menu id."""
+    _require_tier('paid')
+    _apply_site(site)
+    payload = {"name": name}
+    if location:
+        payload["locations"] = [location]
+    m = _v2("POST", "/menus", payload=payload)
+    return json.dumps({"id": m.get("id"), "name": m.get("name"),
+                       "locations": m.get("locations")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_menu(menu_id: int, site: str = "") -> str:
+    """Delete a navigation menu (its items are removed too; the menu location becomes empty)."""
+    _require_tier('paid')
+    _apply_site(site)
+    _v2("DELETE", f"/menus/{menu_id}", params={"force": "true"})
+    return json.dumps({"id": menu_id, "result": "deleted"})
+
+
 # ===========================================================================
 # SITE SETTINGS
 # ===========================================================================
@@ -1508,6 +1695,135 @@ def update_settings(title: str = "", tagline: str = "", timezone: str = "", site
     s = _v2("POST", "/settings", payload=payload)
     return json.dumps({"title": s.get("title"), "tagline": s.get("description"),
                        "timezone": s.get("timezone_string")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_reading_settings(front_page: str = "", front_page_id: int = 0,
+                            posts_page_id: int = 0, posts_per_page: int = 0,
+                            search_engine_visible: str = "", site: str = "") -> str:
+    """WordPress Reading settings. front_page='posts' (blog) or 'page' (a static page).
+    When 'page', set front_page_id (the homepage page) and posts_page_id (the blog page).
+    posts_per_page = how many posts per page. search_engine_visible='yes'/'no' toggles
+    'Discourage search engines' (blog_public). Only provided fields change."""
+    _require_tier('pro')
+    _apply_site(site)
+    payload = {}
+    if front_page in ("posts", "page"):
+        payload["show_on_front"] = front_page
+    if front_page_id:
+        payload["page_on_front"] = front_page_id
+    if posts_page_id:
+        payload["page_for_posts"] = posts_page_id
+    if posts_per_page:
+        payload["posts_per_page"] = posts_per_page
+    if search_engine_visible in ("yes", "no"):
+        # blog_public: 1 = visible to search engines, 0 = discouraged.
+        payload["blog_public"] = 1 if search_engine_visible == "yes" else 0
+    if not payload:
+        return "Nothing to update."
+    # Some of these live on core /settings; others need the Studio option endpoint.
+    core, opts = {}, {}
+    for k, v in payload.items():
+        if k in ("show_on_front", "page_on_front", "page_for_posts", "posts_per_page"):
+            core[k] = v
+        else:
+            opts[k] = v
+    out = {}
+    if core:
+        try:
+            s = _v2("POST", "/settings", payload=core)
+            out.update({k: s.get(k) for k in core})
+        except Exception as e:  # noqa: BLE001
+            out["core_error"] = str(e)[:120]
+    for k, v in opts.items():
+        try:
+            _request("POST", "/wpps/v1/option", payload={"key": k, "value": str(v)})
+            out[k] = v
+        except Exception as e:  # noqa: BLE001
+            out[f"{k}_error"] = str(e)[:120]
+    return json.dumps({"updated": out}, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_discussion_settings(allow_comments: str = "", require_name_email: str = "",
+                               require_registration: str = "", hold_for_moderation: str = "",
+                               close_after_days: int = -1, site: str = "") -> str:
+    """WordPress Discussion settings. Each yes/no toggle: allow_comments (new posts default),
+    require_name_email, require_registration (only logged-in can comment), hold_for_moderation
+    (queue every comment). close_after_days = auto-close comments on posts older than N days
+    (0 = never). Requires wptaskify Studio. Only provided fields change."""
+    _require_tier('pro')
+    _apply_site(site)
+    g = _studio_guard()
+    if g:
+        return g
+    yn = lambda v: "open" if v == "yes" else "closed"  # noqa: E731
+    opts = {}
+    if allow_comments in ("yes", "no"):
+        opts["default_comment_status"] = yn(allow_comments)
+    if require_name_email in ("yes", "no"):
+        opts["require_name_email"] = "1" if require_name_email == "yes" else "0"
+    if require_registration in ("yes", "no"):
+        opts["comment_registration"] = "1" if require_registration == "yes" else "0"
+    if hold_for_moderation in ("yes", "no"):
+        opts["comment_moderation"] = "1" if hold_for_moderation == "yes" else "0"
+    if close_after_days >= 0:
+        opts["close_comments_for_old_posts"] = "1" if close_after_days > 0 else "0"
+        if close_after_days > 0:
+            opts["close_comments_days_old"] = str(close_after_days)
+    if not opts:
+        return "Nothing to update."
+    out = {}
+    for k, v in opts.items():
+        try:
+            _request("POST", "/wpps/v1/option", payload={"key": k, "value": v})
+            out[k] = v
+        except Exception as e:  # noqa: BLE001
+            out[f"{k}_error"] = str(e)[:120]
+    return json.dumps({"updated": out}, ensure_ascii=False)
+
+
+@mcp.tool()
+def list_widgets(site: str = "") -> str:
+    """List the site's widgets and widget areas (sidebars). Returns each sidebar's id/name
+    and the widgets in it. Many classic themes use widgets for footers/sidebars."""
+    _require_tier('paid')
+    _apply_site(site)
+    try:
+        sidebars = _v2("GET", "/sidebars", params={"context": "edit"})
+        widgets = _v2("GET", "/widgets", params={"context": "edit"})
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({"error": f"Widgets REST not available: {str(e)[:120]}"})
+    wmap = {}
+    for w in (widgets or []):
+        wmap.setdefault(w.get("sidebar", ""), []).append(
+            {"id": w.get("id"), "type": w.get("id_base"),
+             "rendered": (w.get("rendered") or "")[:120]})
+    out = [{"sidebar_id": s.get("id"), "name": s.get("name"),
+            "widgets": wmap.get(s.get("id"), [])} for s in (sidebars or [])]
+    return json.dumps({"sidebars": out}, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def add_widget(sidebar_id: str, block_html: str, site: str = "") -> str:
+    """Add a block widget to a widget area (sidebar). `block_html` is Gutenberg block markup,
+    e.g. '<!-- wp:paragraph --><p>Hello</p><!-- /wp:paragraph -->' or a heading/list block.
+    Find sidebar_id via list_widgets. Great for footer text, a CTA, or an ad block."""
+    _require_tier('paid')
+    _apply_site(site)
+    payload = {"sidebar": sidebar_id, "id_base": "block",
+               "instance": {"raw": {"content": block_html}}}
+    w = _v2("POST", "/widgets", payload=payload)
+    return json.dumps({"id": w.get("id"), "sidebar": w.get("sidebar")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_widget(widget_id: str, site: str = "") -> str:
+    """Remove a widget from its widget area (by widget id from list_widgets)."""
+    _require_tier('paid')
+    _apply_site(site)
+    _v2("DELETE", f"/widgets/{widget_id}", params={"force": "true"})
+    return json.dumps({"id": widget_id, "result": "deleted"})
 
 
 def _resolve_media_id(image, filename_hint):
