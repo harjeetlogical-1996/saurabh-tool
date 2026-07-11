@@ -2751,23 +2751,26 @@ def save_social_links(links: dict):
 
 # --- Analytics & Search Console (admin-managed, injected into every page <head>) ----
 def get_analytics():
-    """Return {ga_id, gsc_verify, head_extra} for the site <head>.
+    """Return {ga_id, gsc_verify, clarity_id, head_extra} for the site <head>.
     ga_id: a GA4 Measurement ID (G-XXXXXXX) - loads the gtag.js snippet.
     gsc_verify: the value of a google-site-verification meta tag (or the full tag).
+    clarity_id: a Microsoft Clarity project id - loads the session-recording snippet.
     head_extra: any raw verification/analytics tags to inject verbatim (Bing, Ahrefs, etc.)."""
     raw = get_setting("analytics") or {}
     if not isinstance(raw, dict):
-        return {"ga_id": "", "gsc_verify": "", "head_extra": ""}
+        return {"ga_id": "", "gsc_verify": "", "clarity_id": "", "head_extra": ""}
     return {
         "ga_id": str(raw.get("ga_id", "")).strip(),
         "gsc_verify": str(raw.get("gsc_verify", "")).strip(),
+        "clarity_id": str(raw.get("clarity_id", "")).strip(),
         "head_extra": str(raw.get("head_extra", "")).strip(),
     }
 
 
-def save_analytics(ga_id="", gsc_verify="", head_extra=""):
+def save_analytics(ga_id="", gsc_verify="", head_extra="", clarity_id=""):
     """Persist analytics settings. GA id is validated to the G-XXXX form; the Search
-    Console value accepts either the bare token or the full meta tag (we extract it)."""
+    Console value accepts either the bare token or the full meta tag (we extract it).
+    clarity_id is a short alphanumeric Microsoft Clarity project id."""
     ga_id = (ga_id or "").strip()
     if ga_id and not re.match(r"^(G|UA|GT|AW)-[A-Za-z0-9-]+$", ga_id):
         # not a recognizable id -> store empty rather than break the tag
@@ -2777,7 +2780,11 @@ def save_analytics(ga_id="", gsc_verify="", head_extra=""):
     m = re.search(r'content=["\']([^"\']+)["\']', gsc)
     if m:
         gsc = m.group(1).strip()
-    val = {"ga_id": ga_id, "gsc_verify": gsc, "head_extra": (head_extra or "").strip()}
+    cid = (clarity_id or "").strip()
+    if cid and not re.match(r"^[A-Za-z0-9]{4,20}$", cid):
+        cid = ""   # Clarity ids are short alphanumeric; ignore anything else
+    val = {"ga_id": ga_id, "gsc_verify": gsc, "clarity_id": cid,
+           "head_extra": (head_extra or "").strip()}
     set_setting("analytics", val)
     return val
 

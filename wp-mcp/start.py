@@ -1202,7 +1202,7 @@ async def _handle_admin(path, method, headers, query, receive, send):
     if method == "POST" and sub == "seo/save":
         f = _form(await _read_body(receive))
         db.save_analytics(ga_id=f.get("ga_id", ""), gsc_verify=f.get("gsc_verify", ""),
-                          head_extra=f.get("head_extra", ""))
+                          head_extra=f.get("head_extra", ""), clarity_id=f.get("clarity_id", ""))
         await redirect("/seo?ok=" + urllib.parse.quote("Analytics & SEO tags saved and applied."))
         return
 

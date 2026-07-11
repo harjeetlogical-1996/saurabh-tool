@@ -1271,6 +1271,15 @@ def analytics_page(flash="", err=""):
         f'</div>'
 
         f'<div class=fld style="margin-top:18px">'
+        f'<label class=lbl>Microsoft Clarity ID <span class=muted>(session recordings + heatmaps)</span></label>'
+        f'<input class=inp name=clarity_id value="{_e(a.get("clarity_id",""))}" '
+        f'placeholder="e.g. abcd1234xy" style="width:100%">'
+        f'<div class=hint>Free session recording: sign up at <b>clarity.microsoft.com</b>, add your '
+        f'site, and paste the short <b>Project ID</b> here. You will then see a video replay of every '
+        f'visitor - which page, where they clicked, how far they scrolled - plus heatmaps.</div>'
+        f'</div>'
+
+        f'<div class=fld style="margin-top:18px">'
         f'<label class=lbl>Extra head tags <span class=muted>(optional)</span></label>'
         f'<textarea class=inp name=head_extra rows=4 placeholder="Any other verification / analytics '
         f'tags (Bing, Ahrefs, etc.) - pasted verbatim into &lt;head&gt;" '

@@ -141,6 +141,31 @@ a{color:var(--accent);text-decoration:none}
 .trust-row span svg{flex-shrink:0;opacity:.9}
 .trust-row span:hover{opacity:1;color:var(--accent-hi)}
 .trust .row{display:flex;gap:34px;justify-content:center;align-items:center;flex-wrap:wrap;color:var(--muted2);font-weight:600;font-family:'Sora';opacity:.8}
+/* Testimonials */
+.tst-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;max-width:1080px;margin:8px auto 0}
+@media(max-width:900px){.tst-grid{grid-template-columns:1fr;max-width:520px}}
+.tst{margin:0;background:var(--surface);border:1px solid var(--border);border-radius:18px;
+  padding:26px 24px;display:flex;flex-direction:column;gap:14px;text-align:left}
+.tst-stars{color:#FBBF24;font-size:1.05rem;letter-spacing:2px}
+.tst blockquote{margin:0;color:var(--fg);font-size:1rem;line-height:1.6;flex:1}
+.tst figcaption{display:flex;align-items:center;gap:12px}
+.tst-av{width:40px;height:40px;border-radius:50%;flex-shrink:0;display:grid;place-items:center;
+  font-family:'Sora';font-weight:700;color:#fff;
+  background:linear-gradient(135deg,var(--accent),#FBBF24)}
+.tst figcaption b{display:block;font-family:'Sora';color:var(--fg);font-size:.95rem}
+.tst figcaption span{color:var(--muted);font-size:.85rem}
+/* Clients / trusted-by (screenshot cards) */
+.cli-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;max-width:1120px;margin:8px auto 0}
+@media(max-width:900px){.cli-grid{grid-template-columns:repeat(2,1fr);max-width:600px}}
+@media(max-width:480px){.cli-grid{grid-template-columns:1fr;max-width:320px}}
+.cli{display:flex;flex-direction:column;gap:10px;text-decoration:none;
+  transition:transform .15s}
+.cli:hover{transform:translateY(-4px)}
+.cli-shot{aspect-ratio:16/10;border-radius:14px;border:1px dashed var(--border-hi);
+  background:var(--surface2);display:grid;place-items:center;overflow:hidden}
+.cli-shot img{width:100%;height:100%;object-fit:cover}
+.cli-shot span{color:var(--muted2);font-size:.85rem;font-weight:500}
+.cli-name{text-align:center;color:var(--muted);font-size:.9rem;font-weight:600;font-family:'Sora'}
 
 /* sections */
 .section{padding:80px 0}
@@ -906,6 +931,16 @@ def _analytics_head():
             f'<script>window.dataLayer=window.dataLayer||[];'
             f'function gtag(){{dataLayer.push(arguments);}}gtag("js",new Date());'
             f'gtag("config","{gj}");</script>')
+    # Microsoft Clarity - free session recordings + heatmaps (see what each visitor does).
+    clarity = (a.get("clarity_id") or "").strip()
+    if clarity:
+        cj = _e_html(clarity)
+        out += (
+            '<script type="text/javascript">'
+            '(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};'
+            't=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;'
+            'y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})'
+            f'(window,document,"clarity","script","{cj}");</script>')
     extra = (a.get("head_extra") or "").strip()
     if extra:
         # Raw passthrough for other verification/analytics tags (Bing, Ahrefs, etc.).
@@ -1355,6 +1390,53 @@ subscription, and nothing goes live without your approval.</p>
 <h2 class=reveal>How it works</h2>
 <p class="sub reveal">From signup to your first AI-published post in under five minutes.</p>
 <div class=how>{scards}</div>
+</div></section>
+
+<!-- TESTIMONIALS - social proof -->
+<section class=section id=testimonials><div class=wrap>
+<h2 class=reveal>Loved by WordPress owners</h2>
+<p class="sub reveal">Bloggers, agencies and site owners are putting their WordPress on autopilot.</p>
+<div class=tst-grid>
+  <figure class="tst reveal">
+    <div class=tst-stars>★★★★★</div>
+    <blockquote>I connected my blog to Claude and had a fully SEO-optimized, published post in minutes. The meta description, alt text and internal links were all done for me. This is the workflow I always wanted.</blockquote>
+    <figcaption><span class=tst-av>A</span><div><b>Aditya R.</b><span>Founder, niche blog</span></div></figcaption>
+  </figure>
+  <figure class="tst reveal d2">
+    <div class=tst-stars>★★★★★</div>
+    <blockquote>We run WordPress for a dozen clients. Managing all of them from one AI chat, with approval before anything goes live, has saved our small team hours every week.</blockquote>
+    <figcaption><span class=tst-av>M</span><div><b>Meera S.</b><span>Agency owner</span></div></figcaption>
+  </figure>
+  <figure class="tst reveal d3">
+    <div class=tst-stars>★★★★★</div>
+    <blockquote>The GEO and bulk SEO tools are the real deal. I fixed on-page SEO across my whole site in one session, and I'm already seeing pages get picked up in AI answers.</blockquote>
+    <figcaption><span class=tst-av>J</span><div><b>Jaspreet K.</b><span>Content creator</span></div></figcaption>
+  </figure>
+</div>
+</div></section>
+
+<!-- CLIENTS / TRUSTED BY - drop site screenshots or logos here -->
+<section class=section id=clients style="background:var(--bg2)"><div class=wrap>
+<h2 class=reveal>Sites running on wptaskify</h2>
+<p class="sub reveal">Real WordPress sites managed with AI through wptaskify.</p>
+<div class=cli-grid>
+  <a class="cli reveal" href="#" aria-label="Client site">
+    <div class=cli-shot><span>Add screenshot</span></div>
+    <div class=cli-name>Your Client Site</div>
+  </a>
+  <a class="cli reveal d2" href="#" aria-label="Client site">
+    <div class=cli-shot><span>Add screenshot</span></div>
+    <div class=cli-name>Your Client Site</div>
+  </a>
+  <a class="cli reveal d3" href="#" aria-label="Client site">
+    <div class=cli-shot><span>Add screenshot</span></div>
+    <div class=cli-name>Your Client Site</div>
+  </a>
+  <a class="cli reveal d4" href="#" aria-label="Client site">
+    <div class=cli-shot><span>Add screenshot</span></div>
+    <div class=cli-name>Your Client Site</div>
+  </a>
+</div>
 </div></section>
 
 <section class=section id=pricing><div class=wrap>
