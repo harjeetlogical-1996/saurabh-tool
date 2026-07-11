@@ -6475,6 +6475,724 @@ def shopify_delete_discount(price_rule_id: int, site: str = "") -> str:
     return json.dumps({"id": price_rule_id, "result": "deleted"})
 
 
+@mcp.tool()
+def shopify_get_discount(price_rule_id: int, site: str = "") -> str:
+    """Get a discount (price rule) detail plus its discount codes."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    pr = _shopify_request("GET", f"/price_rules/{price_rule_id}.json").get("price_rule", {})
+    codes = _shopify_request("GET", f"/price_rules/{price_rule_id}/discount_codes.json").get("discount_codes", [])
+    return json.dumps({"price_rule": {"id": pr.get("id"), "title": pr.get("title"),
+                       "value_type": pr.get("value_type"), "value": pr.get("value"),
+                       "starts_at": pr.get("starts_at"), "ends_at": pr.get("ends_at")},
+                       "codes": [{"code": c.get("code"), "usage_count": c.get("usage_count")}
+                                 for c in codes]}, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_update_discount(price_rule_id: int, value: str = "", ends_at: str = "",
+                            usage_limit: int = -1, site: str = "") -> str:
+    """Edit a discount (price rule): change its `value` (e.g. '15'), ends_at (YYYY-MM-DD) or
+    usage_limit. Only provided fields change."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    rule = {"id": price_rule_id}
+    if value:
+        try:
+            rule["value"] = str(-abs(float(value)))
+        except (TypeError, ValueError):
+            return json.dumps({"error": "value must be a number"})
+    if ends_at:
+        rule["ends_at"] = ends_at + "T23:59:59Z"
+    if usage_limit >= 0:
+        rule["usage_limit"] = usage_limit
+    if len(rule) == 1:
+        return "Nothing to update."
+    pr = _shopify_request("PUT", f"/price_rules/{price_rule_id}.json",
+                          payload={"price_rule": rule}).get("price_rule", {})
+    return json.dumps({"id": pr.get("id"), "value": pr.get("value"),
+                       "ends_at": pr.get("ends_at")}, ensure_ascii=False)
+
+
+# ----- Shopify customers -----
+def _slim_customer(c):
+    return {"id": c.get("id"),
+            "name": (f"{c.get('first_name','')} {c.get('last_name','')}").strip(),
+            "email": c.get("email"), "phone": c.get("phone"),
+            "orders_count": c.get("orders_count"), "total_spent": c.get("total_spent"),
+            "tags": c.get("tags"), "state": c.get("state")}
+
+
+@mcp.tool()
+def shopify_list_customers(search: str = "", limit: int = 20, site: str = "") -> str:
+    """List (or search) Shopify customers (name, email, phone, orders count, total spent).
+    `search` matches name/email/phone."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    if search:
+        data = _shopify_request("GET", "/customers/search.json",
+                                params={"query": search, "limit": min(limit, 100)})
+    else:
+        data = _shopify_request("GET", "/customers.json", params={"limit": min(limit, 100)})
+    return json.dumps([_slim_customer(c) for c in (data.get("customers") or [])],
+                      indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_get_customer(customer_id: int, site: str = "") -> str:
+    """Get a Shopify customer's full detail incl. default address and notes."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    c = _shopify_request("GET", f"/customers/{customer_id}.json").get("customer", {})
+    s = _slim_customer(c)
+    s["note"] = c.get("note")
+    s["addresses"] = c.get("addresses")
+    return json.dumps(s, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_create_customer(email: str, first_name: str = "", last_name: str = "",
+                            phone: str = "", tags: str = "", note: str = "",
+                            site: str = "") -> str:
+    """Create a Shopify customer. email is required. tags comma-separated."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    cust = {"email": email}
+    for k, v in (("first_name", first_name), ("last_name", last_name), ("phone", phone),
+                 ("tags", tags), ("note", note)):
+        if v:
+            cust[k] = v
+    c = _shopify_request("POST", "/customers.json", payload={"customer": cust}).get("customer", {})
+    return json.dumps(_slim_customer(c), ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_update_customer(customer_id: int, email: str = "", first_name: str = "",
+                            last_name: str = "", phone: str = "", tags: str = "",
+                            note: str = "", site: str = "") -> str:
+    """Edit a Shopify customer: email, name, phone, tags (replaces) or note. Only non-empty
+    fields change."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    cust = {"id": customer_id}
+    for k, v in (("email", email), ("first_name", first_name), ("last_name", last_name),
+                 ("phone", phone), ("tags", tags), ("note", note)):
+        if v:
+            cust[k] = v
+    if len(cust) == 1:
+        return "Nothing to update."
+    c = _shopify_request("PUT", f"/customers/{customer_id}.json",
+                         payload={"customer": cust}).get("customer", {})
+    return json.dumps(_slim_customer(c), ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_delete_customer(customer_id: int, site: str = "") -> str:
+    """Delete a Shopify customer (only if they have no orders)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    _shopify_request("DELETE", f"/customers/{customer_id}.json")
+    return json.dumps({"id": customer_id, "result": "deleted"})
+
+
+@mcp.tool()
+def shopify_customer_orders(customer_id: int, site: str = "") -> str:
+    """List a specific customer's orders."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", f"/customers/{customer_id}/orders.json",
+                            params={"status": "any"})
+    return json.dumps([_slim_shopify_order(o) for o in (data.get("orders") or [])],
+                      indent=2, ensure_ascii=False)
+
+
+# ----- Shopify orders: refunds, drafts, update, transactions -----
+@mcp.tool()
+def shopify_update_order(order_id: int, email: str = "", note: str = "", tags: str = "",
+                         site: str = "") -> str:
+    """Edit a Shopify order's email, note or tags (tags replaces). Only non-empty fields change."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    order = {"id": order_id}
+    for k, v in (("email", email), ("note", note), ("tags", tags)):
+        if v:
+            order[k] = v
+    if len(order) == 1:
+        return "Nothing to update."
+    o = _shopify_request("PUT", f"/orders/{order_id}.json", payload={"order": order}).get("order", {})
+    return json.dumps({"id": o.get("id"), "email": o.get("email"), "tags": o.get("tags")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_refund_order(order_id: int, amount: str = "", reason: str = "",
+                         restock: bool = True, site: str = "") -> str:
+    """Refund a Shopify order. If `amount` is empty, refunds the full order total. `reason` is
+    a note. restock=True returns items to inventory. This moves real money - use carefully."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    order = _shopify_request("GET", f"/orders/{order_id}.json").get("order", {})
+    currency = order.get("currency", "USD")
+    # Build refund line items (full refund of each line if no amount given).
+    refund = {"notify": False, "note": reason or "Refund via wptaskify",
+              "shipping": {"full_refund": True}}
+    if restock:
+        line_items = []
+        for li in (order.get("line_items") or []):
+            line_items.append({"line_item_id": li.get("id"), "quantity": li.get("quantity"),
+                               "restock_type": "return"})
+        refund["refund_line_items"] = line_items
+    # Compute transactions to refund.
+    if amount:
+        parent = None
+        try:
+            txns = _shopify_request("GET", f"/orders/{order_id}/transactions.json").get("transactions", [])
+            for t in txns:
+                if t.get("kind") in ("sale", "capture") and t.get("status") == "success":
+                    parent = t.get("id"); break
+        except Exception:
+            pass
+        refund["transactions"] = [{"parent_id": parent, "amount": str(amount),
+                                   "kind": "refund", "gateway": order.get("gateway"),
+                                   "currency": currency}]
+    r = _shopify_request("POST", f"/orders/{order_id}/refunds.json",
+                         payload={"refund": refund}).get("refund", {})
+    return json.dumps({"order_id": order_id, "refund_id": r.get("id"),
+                       "restocked": restock}, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_list_order_transactions(order_id: int, site: str = "") -> str:
+    """List an order's payment transactions (sale, capture, refund) with amounts and status."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    txns = _shopify_request("GET", f"/orders/{order_id}/transactions.json").get("transactions", [])
+    return json.dumps([{"id": t.get("id"), "kind": t.get("kind"), "status": t.get("status"),
+                        "amount": t.get("amount"), "gateway": t.get("gateway"),
+                        "created_at": t.get("created_at")} for t in txns], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_list_draft_orders(site: str = "") -> str:
+    """List draft orders (manual/phone sales not yet completed)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", "/draft_orders.json", params={"limit": 50})
+    return json.dumps([{"id": d.get("id"), "name": d.get("name"), "status": d.get("status"),
+                        "total_price": d.get("total_price"), "email": d.get("email")}
+                       for d in (data.get("draft_orders") or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_create_draft_order(line_items_json: str, customer_email: str = "",
+                               note: str = "", site: str = "") -> str:
+    """Create a draft order (e.g. a manual/phone sale). line_items_json is a JSON array like
+    '[{"variant_id":123,"quantity":2}]' or '[{"title":"Custom","price":"10.00","quantity":1}]'.
+    Then use shopify_complete_draft_order or shopify_send_draft_invoice."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    try:
+        items = json.loads(line_items_json)
+    except Exception:
+        return json.dumps({"error": "line_items_json must be a valid JSON array."})
+    draft = {"line_items": items}
+    if customer_email:
+        draft["email"] = customer_email
+    if note:
+        draft["note"] = note
+    d = _shopify_request("POST", "/draft_orders.json",
+                         payload={"draft_order": draft}).get("draft_order", {})
+    return json.dumps({"id": d.get("id"), "name": d.get("name"),
+                       "total_price": d.get("total_price"),
+                       "invoice_url": d.get("invoice_url")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_send_draft_invoice(draft_order_id: int, site: str = "") -> str:
+    """Email the customer an invoice/checkout link for a draft order so they can pay online."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    _shopify_request("POST", f"/draft_orders/{draft_order_id}/send_invoice.json",
+                     payload={"draft_order_invoice": {}})
+    return json.dumps({"draft_order_id": draft_order_id, "result": "invoice sent"})
+
+
+@mcp.tool()
+def shopify_complete_draft_order(draft_order_id: int, paid: bool = True, site: str = "") -> str:
+    """Turn a draft order into a real order. paid=True marks it paid; False leaves payment
+    pending."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    params = {} if paid else {"payment_pending": "true"}
+    d = _shopify_request("PUT", f"/draft_orders/{draft_order_id}/complete.json",
+                         params=params).get("draft_order", {})
+    return json.dumps({"draft_order_id": draft_order_id, "order_id": d.get("order_id"),
+                       "status": d.get("status")}, ensure_ascii=False)
+
+
+# ----- Shopify inventory + locations -----
+@mcp.tool()
+def shopify_list_locations(site: str = "") -> str:
+    """List the store's inventory locations (id, name). Needed to set stock per location."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", "/locations.json")
+    return json.dumps([{"id": l.get("id"), "name": l.get("name"), "active": l.get("active")}
+                       for l in (data.get("locations") or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_set_stock(inventory_item_id: int, location_id: int, available: int,
+                      site: str = "") -> str:
+    """Set the exact stock level of a variant at a location. Get inventory_item_id from a
+    variant (shopify_get_product shows variants), and location_id from shopify_list_locations.
+    This is the real 'stock quantity' control for multi-location stores."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    r = _shopify_request("POST", "/inventory_levels/set.json",
+                         payload={"location_id": location_id,
+                                  "inventory_item_id": inventory_item_id,
+                                  "available": available}).get("inventory_level", {})
+    return json.dumps({"inventory_item_id": inventory_item_id, "location_id": location_id,
+                       "available": r.get("available")}, ensure_ascii=False)
+
+
+# ----- Shopify collections -----
+@mcp.tool()
+def shopify_list_collections(site: str = "") -> str:
+    """List the store's collections (manual/custom + smart/automated) with id, title, handle."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    out = []
+    for kind, key in (("custom", "custom_collections"), ("smart", "smart_collections")):
+        try:
+            data = _shopify_request("GET", f"/{key}.json", params={"limit": 100})
+            for c in (data.get(key) or []):
+                out.append({"id": c.get("id"), "title": c.get("title"),
+                            "handle": c.get("handle"), "type": kind,
+                            "products_count": c.get("products_count")})
+        except Exception:
+            pass
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_create_collection(title: str, body_html: str = "", site: str = "") -> str:
+    """Create a manual (custom) collection. Add products with shopify_add_to_collection."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    coll = {"title": title}
+    if body_html:
+        coll["body_html"] = body_html
+    c = _shopify_request("POST", "/custom_collections.json",
+                         payload={"custom_collection": coll}).get("custom_collection", {})
+    return json.dumps({"id": c.get("id"), "title": c.get("title"), "handle": c.get("handle")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_delete_collection(collection_id: int, site: str = "") -> str:
+    """Delete a manual (custom) collection (products are not deleted)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    _shopify_request("DELETE", f"/custom_collections/{collection_id}.json")
+    return json.dumps({"id": collection_id, "result": "deleted"})
+
+
+@mcp.tool()
+def shopify_add_to_collection(collection_id: int, product_id: int, site: str = "") -> str:
+    """Add a product to a manual collection."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    c = _shopify_request("POST", "/collects.json",
+                         payload={"collect": {"collection_id": collection_id,
+                                              "product_id": product_id}}).get("collect", {})
+    return json.dumps({"collect_id": c.get("id"), "collection_id": collection_id,
+                       "product_id": product_id}, ensure_ascii=False)
+
+
+# ----- Shopify product variants + images -----
+@mcp.tool()
+def shopify_add_variant(product_id: int, price: str, option1: str = "", sku: str = "",
+                        inventory_quantity: int = -1, site: str = "") -> str:
+    """Add a variant to a product (e.g. a new size/colour). option1 is the variant option
+    value (e.g. 'Large'). price is a string."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    variant = {"price": str(price)}
+    if option1:
+        variant["option1"] = option1
+    if sku:
+        variant["sku"] = sku
+    if inventory_quantity >= 0:
+        variant["inventory_management"] = "shopify"
+        variant["inventory_quantity"] = inventory_quantity
+    v = _shopify_request("POST", f"/products/{product_id}/variants.json",
+                         payload={"variant": variant}).get("variant", {})
+    return json.dumps({"id": v.get("id"), "title": v.get("title"), "price": v.get("price")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_delete_variant(product_id: int, variant_id: int, site: str = "") -> str:
+    """Delete a variant from a product (a product must keep at least one variant)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    _shopify_request("DELETE", f"/products/{product_id}/variants/{variant_id}.json")
+    return json.dumps({"product_id": product_id, "variant_id": variant_id, "result": "deleted"})
+
+
+@mcp.tool()
+def shopify_add_product_image(product_id: int, image_url: str, alt: str = "", site: str = "") -> str:
+    """Add an image to a product from a public URL."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    img = {"src": image_url}
+    if alt:
+        img["alt"] = alt
+    r = _shopify_request("POST", f"/products/{product_id}/images.json",
+                         payload={"image": img}).get("image", {})
+    return json.dumps({"image_id": r.get("id"), "src": r.get("src")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_delete_product_image(product_id: int, image_id: int, site: str = "") -> str:
+    """Delete an image from a product."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    _shopify_request("DELETE", f"/products/{product_id}/images/{image_id}.json")
+    return json.dumps({"product_id": product_id, "image_id": image_id, "result": "deleted"})
+
+
+# ----- Shopify content: pages, articles, blogs, redirects -----
+@mcp.tool()
+def shopify_list_pages(site: str = "") -> str:
+    """List the store's static pages (About, Contact, etc.) with id, title, handle."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", "/pages.json", params={"limit": 100})
+    return json.dumps([{"id": p.get("id"), "title": p.get("title"), "handle": p.get("handle"),
+                        "published": bool(p.get("published_at"))}
+                       for p in (data.get("pages") or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_create_page(title: str, body_html: str, published: bool = False, site: str = "") -> str:
+    """Create a static page (e.g. About, Shipping Policy). published=False saves a draft."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    p = _shopify_request("POST", "/pages.json",
+                         payload={"page": {"title": title, "body_html": body_html,
+                                           "published": published}}).get("page", {})
+    return json.dumps({"id": p.get("id"), "title": p.get("title"), "handle": p.get("handle")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_update_page(page_id: int, title: str = "", body_html: str = "",
+                        published: str = "", site: str = "") -> str:
+    """Edit a static page. published = 'yes'/'no' to publish/unpublish. Only non-empty fields
+    change."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    page = {"id": page_id}
+    if title:
+        page["title"] = title
+    if body_html:
+        page["body_html"] = body_html
+    if published in ("yes", "no"):
+        page["published"] = (published == "yes")
+    if len(page) == 1:
+        return "Nothing to update."
+    p = _shopify_request("PUT", f"/pages/{page_id}.json", payload={"page": page}).get("page", {})
+    return json.dumps({"id": p.get("id"), "title": p.get("title")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_delete_page(page_id: int, site: str = "") -> str:
+    """Delete a static page."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    _shopify_request("DELETE", f"/pages/{page_id}.json")
+    return json.dumps({"id": page_id, "result": "deleted"})
+
+
+@mcp.tool()
+def shopify_list_articles(blog_id: int, site: str = "") -> str:
+    """List articles in a Shopify blog (id, title, published)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", f"/blogs/{blog_id}/articles.json", params={"limit": 50})
+    return json.dumps([{"id": a.get("id"), "title": a.get("title"),
+                        "published": bool(a.get("published_at"))}
+                       for a in (data.get("articles") or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_update_article(blog_id: int, article_id: int, title: str = "", body_html: str = "",
+                           tags: str = "", published: str = "", site: str = "") -> str:
+    """Edit a blog article. published = 'yes'/'no'. Only non-empty fields change."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    art = {"id": article_id}
+    if title:
+        art["title"] = title
+    if body_html:
+        art["body_html"] = body_html
+    if tags:
+        art["tags"] = tags
+    if published in ("yes", "no"):
+        art["published"] = (published == "yes")
+    if len(art) == 1:
+        return "Nothing to update."
+    a = _shopify_request("PUT", f"/blogs/{blog_id}/articles/{article_id}.json",
+                         payload={"article": art}).get("article", {})
+    return json.dumps({"id": a.get("id"), "title": a.get("title")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_delete_article(blog_id: int, article_id: int, site: str = "") -> str:
+    """Delete a blog article."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    _shopify_request("DELETE", f"/blogs/{blog_id}/articles/{article_id}.json")
+    return json.dumps({"blog_id": blog_id, "article_id": article_id, "result": "deleted"})
+
+
+@mcp.tool()
+def shopify_create_redirect(from_path: str, to_path: str, site: str = "") -> str:
+    """Create a URL redirect (e.g. from '/old-product' to '/products/new'). Great after
+    deleting or renaming products/pages so old links don't 404."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    r = _shopify_request("POST", "/redirects.json",
+                         payload={"redirect": {"path": from_path, "target": to_path}}).get("redirect", {})
+    return json.dumps({"id": r.get("id"), "from": r.get("path"), "to": r.get("target")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_list_redirects(site: str = "") -> str:
+    """List the store's URL redirects."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", "/redirects.json", params={"limit": 100})
+    return json.dumps([{"id": r.get("id"), "from": r.get("path"), "to": r.get("target")}
+                       for r in (data.get("redirects") or [])], indent=2, ensure_ascii=False)
+
+
+# ----- Shopify metafields (custom data) -----
+@mcp.tool()
+def shopify_set_metafield(owner_type: str, owner_id: int, namespace: str, key: str,
+                          value: str, value_type: str = "single_line_text_field",
+                          site: str = "") -> str:
+    """Set a metafield (custom data field) on a product/customer/order/collection or the shop.
+    owner_type = products / customers / orders / collections / shop. value_type is a Shopify
+    metafield type (single_line_text_field, number_integer, json, etc.)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    mf = {"namespace": namespace, "key": key, "value": value, "type": value_type}
+    if owner_type == "shop":
+        path = "/metafields.json"
+    else:
+        path = f"/{owner_type}/{owner_id}/metafields.json"
+    r = _shopify_request("POST", path, payload={"metafield": mf}).get("metafield", {})
+    return json.dumps({"id": r.get("id"), "namespace": r.get("namespace"), "key": r.get("key")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_list_metafields(owner_type: str, owner_id: int = 0, site: str = "") -> str:
+    """List metafields on a product/customer/order/collection (owner_id required) or the shop
+    (owner_type='shop', owner_id ignored)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    path = "/metafields.json" if owner_type == "shop" else f"/{owner_type}/{owner_id}/metafields.json"
+    data = _shopify_request("GET", path)
+    return json.dumps([{"id": m.get("id"), "namespace": m.get("namespace"), "key": m.get("key"),
+                        "value": m.get("value"), "type": m.get("type")}
+                       for m in (data.get("metafields") or [])], indent=2, ensure_ascii=False)
+
+
+# ----- Shopify webhooks + theme assets + gift cards + abandoned checkouts -----
+@mcp.tool()
+def shopify_list_webhooks(site: str = "") -> str:
+    """List the store's webhooks (topic + delivery address)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", "/webhooks.json")
+    return json.dumps([{"id": w.get("id"), "topic": w.get("topic"), "address": w.get("address")}
+                       for w in (data.get("webhooks") or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_create_webhook(topic: str, address: str, site: str = "") -> str:
+    """Create a webhook (e.g. topic='orders/create', address='https://your-endpoint'). Lets you
+    react to store events."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    w = _shopify_request("POST", "/webhooks.json",
+                         payload={"webhook": {"topic": topic, "address": address,
+                                              "format": "json"}}).get("webhook", {})
+    return json.dumps({"id": w.get("id"), "topic": w.get("topic")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_delete_webhook(webhook_id: int, site: str = "") -> str:
+    """Delete a webhook."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    _shopify_request("DELETE", f"/webhooks/{webhook_id}.json")
+    return json.dumps({"id": webhook_id, "result": "deleted"})
+
+
+@mcp.tool()
+def shopify_list_themes(site: str = "") -> str:
+    """List the store's themes (id, name, role). role='main' is the live theme."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", "/themes.json")
+    return json.dumps([{"id": t.get("id"), "name": t.get("name"), "role": t.get("role")}
+                       for t in (data.get("themes") or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_list_abandoned_checkouts(limit: int = 20, site: str = "") -> str:
+    """List abandoned checkouts (carts a customer started but didn't complete) - useful for
+    recovery. Returns email, total, and recovery URL."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", "/checkouts.json", params={"limit": min(limit, 100)})
+    return json.dumps([{"id": c.get("id"), "email": c.get("email"),
+                        "total_price": c.get("total_price"),
+                        "abandoned_checkout_url": c.get("abandoned_checkout_url"),
+                        "created_at": c.get("created_at")}
+                       for c in (data.get("checkouts") or [])], indent=2, ensure_ascii=False)
+
+
 def _iso_now_z():
     """Current UTC time as an ISO8601 Z string (for Shopify starts_at). Uses the WP site's
     time via a cheap call is overkill; a plain formatted now is fine for a start time."""
