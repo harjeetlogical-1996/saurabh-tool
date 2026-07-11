@@ -2672,6 +2672,28 @@ def _gemini_describe_image(image_url: str) -> str:
     return ""
 
 
+def _gemini_text(prompt: str) -> str:
+    """Ask Gemini (text) for a completion. Returns the text, or '' if no key/failure.
+    Used for product descriptions and other short content generation."""
+    cfg = _cfg()
+    api_key = cfg.get("gemini_api_key", "")
+    if not api_key:
+        raise RuntimeError("No Gemini API key for this tenant (add one or set platform "
+                           "GEMINI_API_KEY) - needed to generate text.")
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"gemini-flash-latest:generateContent?key={api_key}")
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=90) as r:
+        resp = json.load(r)
+    for cand in resp.get("candidates", []):
+        for part in (cand.get("content") or {}).get("parts", []):
+            if part.get("text"):
+                return part["text"].strip()
+    return ""
+
+
 @mcp.tool()
 def generate_alt_text_ai(limit: int = 30, apply: bool = False, site: str = "") -> str:
     """AI alt-text generator: for images with EMPTY alt text, use Gemini vision to
@@ -5322,6 +5344,567 @@ def bulk_amazon_links(max_per_post: int = 2, limit: int = 300, dry_run: bool = F
                        "total_links": total, "items": summary,
                        "reminder": "Add an Amazon affiliate disclosure to your site."},
                       indent=2, ensure_ascii=False)
+
+
+# ===========================================================================
+# WOOCOMMERCE - manage an online store (products, orders, coupons, categories).
+# Uses the WooCommerce REST API at /wc/v3/*, authenticated with the SAME
+# Application Password (Basic auth over HTTPS) already used for wp/v2 - no extra
+# consumer key/secret needed. A WooCommerce product is post type 'product', so
+# product SEO reuses update_post_seo/update_post_aeo with post_type='product'.
+# ===========================================================================
+def _woo_guard():
+    """Return an error JSON string if WooCommerce isn't active on this site, else ''.
+    Mirrors _studio_guard so tools give a clear message instead of a raw 404."""
+    try:
+        r = _request("GET", "/wc/v3/system_status")
+        if isinstance(r, dict):
+            return ""
+    except Exception:
+        pass
+    return json.dumps({
+        "error": "WooCommerce isn't detected on this site.",
+        "fix": "Install and activate the WooCommerce plugin, then make sure the connected "
+               "WordPress user is a Shop Manager or Administrator. These tools use the same "
+               "Application Password you already connected - no extra API keys needed.",
+    })
+
+
+def _slim_product(p):
+    """Flatten a WooCommerce product to the fields worth showing."""
+    return {
+        "id": p.get("id"),
+        "name": p.get("name"),
+        "sku": p.get("sku"),
+        "type": p.get("type"),
+        "status": p.get("status"),
+        "price": p.get("price"),
+        "regular_price": p.get("regular_price"),
+        "sale_price": p.get("sale_price"),
+        "on_sale": p.get("on_sale"),
+        "stock_status": p.get("stock_status"),
+        "stock_quantity": p.get("stock_quantity"),
+        "permalink": p.get("permalink"),
+        "categories": [{"id": c.get("id"), "name": c.get("name")} for c in (p.get("categories") or [])],
+        "images": [i.get("src") for i in (p.get("images") or [])],
+    }
+
+
+def _slim_order(o):
+    return {
+        "id": o.get("id"),
+        "number": o.get("number"),
+        "status": o.get("status"),
+        "total": o.get("total"),
+        "currency": o.get("currency"),
+        "date_created": o.get("date_created"),
+        "customer": (f"{(o.get('billing') or {}).get('first_name','')} "
+                     f"{(o.get('billing') or {}).get('last_name','')}").strip()
+                    or (o.get("billing") or {}).get("email", ""),
+        "email": (o.get("billing") or {}).get("email", ""),
+        "items": [{"name": li.get("name"), "qty": li.get("quantity"), "total": li.get("total")}
+                  for li in (o.get("line_items") or [])],
+    }
+
+
+@mcp.tool()
+def wc_status(site: str = "") -> str:
+    """Check whether WooCommerce is active on this site and get a quick store snapshot
+    (currency, product count, order count). Use this FIRST before other wc_/product/order
+    tools. Read-only."""
+    _apply_site(site)
+    try:
+        _request("GET", "/wc/v3/system_status")
+    except Exception:
+        return json.dumps({"woocommerce_active": False,
+                           "hint": "WooCommerce isn't installed/active on this site."})
+    out = {"woocommerce_active": True}
+    try:
+        settings = _request("GET", "/wc/v3/settings/general")
+        for s in (settings or []):
+            if s.get("id") == "woocommerce_currency":
+                out["currency"] = s.get("value")
+    except Exception:
+        pass
+    # cheap counts via 1-item queries reading the total header isn't available here,
+    # so just report that the store is reachable.
+    try:
+        prods = _request("GET", "/wc/v3/products", params={"per_page": 1})
+        out["products_reachable"] = isinstance(prods, list)
+    except Exception:
+        out["products_reachable"] = False
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+# ----- Products -----
+@mcp.tool()
+def list_products(search: str = "", status: str = "any", per_page: int = 15, page: int = 1,
+                  category: str = "", site: str = "") -> str:
+    """List WooCommerce products (id, name, sku, price, stock, status). Filter by `search`,
+    `status` (publish/draft/any) or `category` (a category id). Use before editing."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    params = {"per_page": min(per_page, 50), "page": page}
+    if search:
+        params["search"] = search
+    if status and status != "any":
+        params["status"] = status
+    if category:
+        params["category"] = category
+    items = _request("GET", "/wc/v3/products", params=params)
+    return json.dumps([_slim_product(p) for p in (items or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def get_product(product_id: int, site: str = "") -> str:
+    """Get a WooCommerce product's full detail: description, short description, price, stock,
+    SKU, categories, attributes and images."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    p = _request("GET", f"/wc/v3/products/{product_id}")
+    slim = _slim_product(p)
+    slim["description"] = p.get("description", "")
+    slim["short_description"] = p.get("short_description", "")
+    slim["attributes"] = [{"name": a.get("name"), "options": a.get("options")}
+                          for a in (p.get("attributes") or [])]
+    return json.dumps(slim, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def create_product(name: str, regular_price: str = "", description: str = "",
+                   short_description: str = "", sku: str = "", type: str = "simple",
+                   stock_quantity: int = -1, category_ids: str = "", image_urls: str = "",
+                   status: str = "draft", site: str = "") -> str:
+    """Create a WooCommerce product. `regular_price` is a string like '19.99'. `type` =
+    simple (default), grouped, external or variable. category_ids/image_urls are
+    comma-separated (image_urls are public image URLs). status defaults to draft (safe)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    payload = {"name": name, "type": type, "status": status}
+    if regular_price:
+        payload["regular_price"] = str(regular_price)
+    if description:
+        payload["description"] = description
+    if short_description:
+        payload["short_description"] = short_description
+    if sku:
+        payload["sku"] = sku
+    if stock_quantity >= 0:
+        payload["manage_stock"] = True
+        payload["stock_quantity"] = stock_quantity
+    if category_ids:
+        payload["categories"] = [{"id": int(x)} for x in category_ids.split(",") if x.strip()]
+    if image_urls:
+        payload["images"] = [{"src": u.strip()} for u in image_urls.split(",") if u.strip()]
+    p = _request("POST", "/wc/v3/products", payload=payload)
+    return json.dumps(_slim_product(p), indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_product(product_id: int, name: str = "", regular_price: str = "", sale_price: str = "",
+                   description: str = "", short_description: str = "", sku: str = "",
+                   status: str = "", category_ids: str = "", site: str = "") -> str:
+    """Edit a WooCommerce product. Only non-empty fields change. Prices are strings ('19.99').
+    Pass status='publish' to make a draft live. category_ids = comma-separated ids."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    payload = {}
+    if name:
+        payload["name"] = name
+    if regular_price:
+        payload["regular_price"] = str(regular_price)
+    if sale_price:
+        payload["sale_price"] = str(sale_price)
+    if description:
+        payload["description"] = description
+    if short_description:
+        payload["short_description"] = short_description
+    if sku:
+        payload["sku"] = sku
+    if status:
+        payload["status"] = status
+    if category_ids:
+        payload["categories"] = [{"id": int(x)} for x in category_ids.split(",") if x.strip()]
+    if not payload:
+        return "Nothing to update."
+    p = _request("POST", f"/wc/v3/products/{product_id}", payload=payload)
+    return json.dumps(_slim_product(p), indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_product_stock(product_id: int, stock_quantity: int = -1, stock_status: str = "",
+                         site: str = "") -> str:
+    """Quick inventory edit for a product. stock_quantity sets a managed count;
+    stock_status = instock / outofstock / onbackorder (for products without a count)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    payload = {}
+    if stock_quantity >= 0:
+        payload["manage_stock"] = True
+        payload["stock_quantity"] = stock_quantity
+    if stock_status in ("instock", "outofstock", "onbackorder"):
+        payload["stock_status"] = stock_status
+    if not payload:
+        return "Provide stock_quantity or stock_status."
+    p = _request("POST", f"/wc/v3/products/{product_id}", payload=payload)
+    return json.dumps({"id": p.get("id"), "stock_status": p.get("stock_status"),
+                       "stock_quantity": p.get("stock_quantity")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def set_product_sale(product_id: int, sale_price: str, date_from: str = "", date_to: str = "",
+                     site: str = "") -> str:
+    """Put a product on sale. sale_price is a string ('14.99'). Optional date_from/date_to
+    (YYYY-MM-DD) schedule the sale window. Pass sale_price='' via update_product to end a sale."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    payload = {"sale_price": str(sale_price)}
+    if date_from:
+        payload["date_on_sale_from"] = date_from
+    if date_to:
+        payload["date_on_sale_to"] = date_to
+    p = _request("POST", f"/wc/v3/products/{product_id}", payload=payload)
+    return json.dumps({"id": p.get("id"), "sale_price": p.get("sale_price"),
+                       "on_sale": p.get("on_sale")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_product(product_id: int, permanent: bool = False, site: str = "") -> str:
+    """Delete a WooCommerce product. Default = move to Trash. permanent=True deletes forever."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    _request("DELETE", f"/wc/v3/products/{product_id}",
+             params={"force": "true"} if permanent else None)
+    return json.dumps({"id": product_id, "result": "deleted" if permanent else "trashed"})
+
+
+# ----- Product content + AI -----
+@mcp.tool()
+def generate_product_description(product_id: int, tone: str = "persuasive",
+                                 keywords: str = "", apply: bool = False, site: str = "") -> str:
+    """Generate a compelling product description + short description with AI, from the product's
+    name, attributes and any existing detail. `tone` guides the style (persuasive/technical/
+    friendly). `keywords` are SEO terms to work in naturally. apply=False PREVIEWS the copy;
+    apply=True saves it. For product SEO meta, use update_post_seo with post_type='product' on
+    this product id afterwards."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    p = _request("GET", f"/wc/v3/products/{product_id}")
+    name = p.get("name", "")
+    attrs = "; ".join(f"{a.get('name')}: {', '.join(a.get('options') or [])}"
+                      for a in (p.get("attributes") or []))
+    prompt = (f"Write an e-commerce product description for '{name}'. "
+              f"{('Attributes: ' + attrs + '. ') if attrs else ''}"
+              f"Tone: {tone}. "
+              f"{('Work in these keywords naturally: ' + keywords + '. ') if keywords else ''}"
+              f"Return two parts separated by a line '---SHORT---': first a full HTML description "
+              f"(2-3 short paragraphs + a bullet list of key benefits), then a 1-2 sentence short "
+              f"description for the product summary. Be accurate; do not invent specs.")
+    text = _gemini_text(prompt)
+    if "---SHORT---" in text:
+        full, short = text.split("---SHORT---", 1)
+    else:
+        full, short = text, ""
+    full, short = full.strip(), short.strip()
+    if not apply:
+        return json.dumps({"mode": "PREVIEW", "product_id": product_id,
+                           "description": full, "short_description": short}, ensure_ascii=False)
+    payload = {"description": full}
+    if short:
+        payload["short_description"] = short
+    _request("POST", f"/wc/v3/products/{product_id}", payload=payload)
+    return json.dumps({"mode": "APPLIED", "product_id": product_id,
+                       "description_chars": len(full), "short_set": bool(short)}, ensure_ascii=False)
+
+
+@mcp.tool()
+def bulk_generate_product_descriptions(limit: int = 20, only_missing: bool = True,
+                                       apply: bool = False, site: str = "") -> str:
+    """Generate descriptions for many products at once. only_missing=True (default) targets
+    products with an EMPTY description. apply=False previews the list that would change; apply=True
+    writes them. Great for filling out an imported catalog."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    prods = _request("GET", "/wc/v3/products", params={"per_page": min(limit, 50)})
+    out = []
+    for p in (prods or []):
+        if only_missing and (p.get("description") or "").strip():
+            continue
+        if apply:
+            try:
+                r = json.loads(generate_product_description(p["id"], apply=True))
+                out.append({"id": p["id"], "name": p.get("name"), "applied": True})
+            except Exception as e:  # noqa: BLE001
+                out.append({"id": p["id"], "error": str(e)[:80]})
+        else:
+            out.append({"id": p["id"], "name": p.get("name"),
+                        "has_description": bool((p.get("description") or "").strip())})
+        if len(out) >= limit:
+            break
+    return json.dumps({"mode": "APPLIED" if apply else "PREVIEW", "count": len(out),
+                       "products": out}, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def generate_product_image(product_id: int, prompt: str = "", set_as_featured: bool = True,
+                           site: str = "") -> str:
+    """Generate a product image with Gemini and attach it to a WooCommerce product. If `prompt`
+    is empty, one is built from the product name. set_as_featured=True makes it the main image."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    p = _request("GET", f"/wc/v3/products/{product_id}")
+    name = p.get("name", "product")
+    if not prompt:
+        prompt = (f"A clean, professional product photo of {name} on a plain white studio "
+                  f"background, e-commerce style, soft shadow, high detail.")
+    img = _gemini_generate_image(prompt)
+    media = _request("POST", "/wp/v2/media", raw_body=img, extra_headers={
+        "Content-Type": "image/png",
+        "Content-Disposition": f'attachment; filename="product-{product_id}.png"',
+    })
+    src = media.get("source_url")
+    # Prepend as featured, or append to the gallery.
+    existing = [{"id": i.get("id")} for i in (p.get("images") or [])]
+    new_img = {"src": src}
+    images = ([new_img] + existing) if set_as_featured else (existing + [new_img])
+    _request("POST", f"/wc/v3/products/{product_id}", payload={"images": images})
+    return json.dumps({"product_id": product_id, "media_id": media.get("id"), "url": src,
+                       "featured": set_as_featured}, ensure_ascii=False)
+
+
+# ----- Product categories -----
+@mcp.tool()
+def list_product_categories(site: str = "") -> str:
+    """List WooCommerce product categories (id, name, slug, count, parent)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    cats = _request("GET", "/wc/v3/products/categories", params={"per_page": 100})
+    return json.dumps([{"id": c.get("id"), "name": c.get("name"), "slug": c.get("slug"),
+                        "count": c.get("count"), "parent": c.get("parent")}
+                       for c in (cats or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def create_product_category(name: str, parent_id: int = 0, description: str = "",
+                            site: str = "") -> str:
+    """Create a WooCommerce product category. Returns its id."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    payload = {"name": name}
+    if parent_id:
+        payload["parent"] = parent_id
+    if description:
+        payload["description"] = description
+    c = _request("POST", "/wc/v3/products/categories", payload=payload)
+    return json.dumps({"id": c.get("id"), "name": c.get("name"), "slug": c.get("slug")})
+
+
+@mcp.tool()
+def delete_product_category(category_id: int, site: str = "") -> str:
+    """Delete a WooCommerce product category (products keep existing, lose this category)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    _request("DELETE", f"/wc/v3/products/categories/{category_id}", params={"force": "true"})
+    return json.dumps({"id": category_id, "result": "deleted"})
+
+
+# ----- Orders (read-focused + status) -----
+@mcp.tool()
+def list_orders(status: str = "any", per_page: int = 15, page: int = 1, customer: int = 0,
+                after: str = "", site: str = "") -> str:
+    """List WooCommerce orders (id, status, total, customer, date, items). Filter by `status`
+    (pending/processing/completed/cancelled/refunded/any), `customer` (a customer id), or
+    `after` (YYYY-MM-DD, orders created after this date)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    params = {"per_page": min(per_page, 50), "page": page}
+    if status and status != "any":
+        params["status"] = status
+    if customer:
+        params["customer"] = customer
+    if after:
+        params["after"] = after + "T00:00:00"
+    orders = _request("GET", "/wc/v3/orders", params=params)
+    return json.dumps([_slim_order(o) for o in (orders or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def get_order(order_id: int, site: str = "") -> str:
+    """Get a WooCommerce order's full detail: line items, customer, billing/shipping, totals,
+    payment method and status."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    o = _request("GET", f"/wc/v3/orders/{order_id}")
+    slim = _slim_order(o)
+    slim["payment_method"] = o.get("payment_method_title")
+    slim["shipping_total"] = o.get("shipping_total")
+    slim["billing"] = o.get("billing")
+    slim["shipping"] = o.get("shipping")
+    return json.dumps(slim, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_order_status(order_id: int, status: str, note: str = "", site: str = "") -> str:
+    """Change a WooCommerce order's status: pending, processing, on-hold, completed, cancelled,
+    refunded, or failed. Optional `note` is added to the order as a private note."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    valid = {"pending", "processing", "on-hold", "completed", "cancelled", "refunded", "failed"}
+    if status not in valid:
+        return json.dumps({"error": f"status must be one of: {', '.join(sorted(valid))}"})
+    o = _request("POST", f"/wc/v3/orders/{order_id}", payload={"status": status})
+    if note:
+        try:
+            _request("POST", f"/wc/v3/orders/{order_id}/notes",
+                     payload={"note": note, "customer_note": False})
+        except Exception:
+            pass
+    return json.dumps({"id": o.get("id"), "status": o.get("status")}, ensure_ascii=False)
+
+
+@mcp.tool()
+def add_order_note(order_id: int, note: str, customer_note: bool = False, site: str = "") -> str:
+    """Add a note to an order. customer_note=True emails it to the customer; False = private
+    (staff-only) note."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    n = _request("POST", f"/wc/v3/orders/{order_id}/notes",
+                 payload={"note": note, "customer_note": customer_note})
+    return json.dumps({"order_id": order_id, "note_id": n.get("id"),
+                       "customer_note": customer_note}, ensure_ascii=False)
+
+
+# ----- Coupons -----
+@mcp.tool()
+def list_coupons(site: str = "") -> str:
+    """List WooCommerce discount coupons (code, type, amount, usage, expiry)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    cs = _request("GET", "/wc/v3/coupons", params={"per_page": 50})
+    return json.dumps([{"id": c.get("id"), "code": c.get("code"),
+                        "type": c.get("discount_type"), "amount": c.get("amount"),
+                        "used": c.get("usage_count"), "limit": c.get("usage_limit"),
+                        "expires": c.get("date_expires")} for c in (cs or [])],
+                      indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def create_coupon(code: str, discount_type: str = "percent", amount: str = "",
+                  expiry: str = "", usage_limit: int = 0, min_amount: str = "",
+                  free_shipping: bool = False, site: str = "") -> str:
+    """Create a WooCommerce coupon. discount_type = percent / fixed_cart / fixed_product.
+    `amount` is '10' (=10% or a fixed amount). Optional expiry (YYYY-MM-DD), usage_limit,
+    min_amount (minimum cart total), and free_shipping."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    payload = {"code": code, "discount_type": discount_type, "amount": str(amount or "0"),
+               "free_shipping": free_shipping}
+    if expiry:
+        payload["date_expires"] = expiry
+    if usage_limit:
+        payload["usage_limit"] = usage_limit
+    if min_amount:
+        payload["minimum_amount"] = str(min_amount)
+    c = _request("POST", "/wc/v3/coupons", payload=payload)
+    return json.dumps({"id": c.get("id"), "code": c.get("code"),
+                       "type": c.get("discount_type"), "amount": c.get("amount")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_coupon(coupon_id: int, site: str = "") -> str:
+    """Delete a WooCommerce coupon permanently."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    _request("DELETE", f"/wc/v3/coupons/{coupon_id}", params={"force": "true"})
+    return json.dumps({"id": coupon_id, "result": "deleted"})
+
+
+@mcp.tool()
+def store_report(period: str = "week", site: str = "") -> str:
+    """Quick store performance summary: total sales, order count and top sellers for a period
+    (week / month / year). A fast 'how is my store doing' snapshot."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    out = {"period": period}
+    try:
+        sales = _request("GET", "/wc/v3/reports/sales", params={"period": period})
+        if isinstance(sales, list) and sales:
+            s = sales[0]
+            out.update({"total_sales": s.get("total_sales"), "net_sales": s.get("net_sales"),
+                        "total_orders": s.get("total_orders"), "total_items": s.get("total_items")})
+    except Exception as e:  # noqa: BLE001
+        out["sales_error"] = str(e)[:80]
+    try:
+        top = _request("GET", "/wc/v3/reports/top_sellers", params={"period": period})
+        out["top_sellers"] = [{"name": t.get("name"), "quantity": t.get("quantity")}
+                              for t in (top or [])][:10]
+    except Exception:
+        pass
+    return json.dumps(out, indent=2, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
