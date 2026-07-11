@@ -585,11 +585,14 @@ def create_cpt_item(post_type: str, title: str, content: str = "", status: str =
 @mcp.tool()
 def update_cpt_item(post_type: str, item_id: int, title: str = "", content: str = "",
                     status: str = "", excerpt: str = "", terms: str = "",
-                    featured_media_id: int = 0, slug: str = "", site: str = "") -> str:
+                    featured_media_id: int = 0, slug: str = "", author_id: int = 0,
+                    site: str = "") -> str:
     """Edit an item of ANY custom post type. Only non-empty fields change. `terms` =
     'taxonomy:id[,id]' to (re)assign custom-taxonomy terms (find IDs with list_taxonomies).
     Pass status='publish' to make a draft live. `slug` changes the URL and 301-redirects the
-    old one automatically (needs the Redirection plugin)."""
+    old one automatically (needs the Redirection plugin). `author_id` sets the author (use
+    list_authors for the id) - this is how you set the author on a custom post type, since
+    set_post_author only works on normal posts."""
     _require_tier('paid')
     _apply_site(site)
     rb = _rest_base_for_type(post_type)
@@ -612,11 +615,14 @@ def update_cpt_item(post_type: str, item_id: int, title: str = "", content: str 
         payload["featured_media"] = featured_media_id
     if slug:
         payload["slug"] = slug
+    if author_id:
+        payload["author"] = author_id
     _apply_terms_to_payload(payload, post_type, terms)
     if not payload:
         return "Nothing to update."
     item = _request("POST", f"/wp/v2/{rb}/{item_id}", payload=payload)
     out = _slim_post(item)
+    out["author"] = item.get("author")
     if slug and old_link:
         out.update(_auto_redirect(old_link, item.get("link", "")))
     return json.dumps(out, indent=2, ensure_ascii=False)
@@ -1245,13 +1251,16 @@ def list_authors(site: str = "") -> str:
 
 
 @mcp.tool()
-def set_post_author(post_id: int, author_id: int, site: str = "") -> str:
+def set_post_author(post_id: int, author_id: int, post_type: str = "post", site: str = "") -> str:
     """Set/change the author of a post (use list_authors to get the id).
-    Good for E-E-A-T - assign the right expert to each article."""
+    Good for E-E-A-T - assign the right expert to each article. For a CUSTOM post type
+    (e.g. 'service'), pass post_type so it targets the right endpoint - otherwise it only
+    works on normal posts."""
     _require_tier('paid')
     _apply_site(site)
-    p = _v2("POST", f"/posts/{post_id}", payload={"author": author_id})
-    return json.dumps({"post_id": post_id, "author": p.get("author")})
+    rb = _rest_base_for_type(post_type)
+    p = _request("POST", f"/wp/v2/{rb}/{post_id}", payload={"author": author_id})
+    return json.dumps({"post_id": post_id, "post_type": post_type, "author": p.get("author")})
 
 
 # ===========================================================================
