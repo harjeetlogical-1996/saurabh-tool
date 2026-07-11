@@ -66,11 +66,17 @@ def _apply_site(site: str):
             raise RuntimeError(
                 f"site '{site}' is not one of your connected sites. "
                 "Use list_my_sites to see the exact URLs.")
-        token = _b64.b64encode(
-            f"{match['wp_username']}:{match['app_password'].replace(' ', '')}".encode()).decode()
         over = dict(base or {})
+        over["platform"] = match.get("platform", "wordpress")
         over["site_url"] = match["site_url"].rstrip("/")
-        over["base_headers"] = {"Authorization": "Basic " + token, "User-Agent": "wp-mcp/3.0"}
+        if over["platform"] == "shopify":
+            over["shop_domain"] = match.get("shop_domain", "")
+            over["base_headers"] = {"X-Shopify-Access-Token": match.get("access_token", ""),
+                                    "User-Agent": "wp-mcp/3.0"}
+        else:
+            token = _b64.b64encode(
+                f"{match['wp_username']}:{match['app_password'].replace(' ', '')}".encode()).decode()
+            over["base_headers"] = {"Authorization": "Basic " + token, "User-Agent": "wp-mcp/3.0"}
         _site_cfg_cache[key] = over
     _call_site_cfg.set(over)
 
@@ -79,21 +85,24 @@ def make_tenant_config(site_url: str, username: str, app_password: str,
                        gemini_api_key: str = "", user_id: str = "", credit_hook=None,
                        toolcall_hook=None, approval_hook=None, approval_status_hook=None,
                        balance_hook=None, credit_refund_hook=None, toolcall_refund_hook=None,
-                       plan: str = ""):
-    """Build a tenant config dict with precomputed auth header.
+                       plan: str = "", platform: str = "wordpress",
+                       shop_domain: str = "", access_token: str = ""):
+    """Build a tenant config dict with precomputed auth header. Platform-aware:
+    WordPress uses Basic auth (username + app_password); Shopify uses the
+    X-Shopify-Access-Token header (shop_domain + access_token).
     credit_hook() -> bool: consume 1 image credit (image tools).
-    credit_refund_hook(): give back 1 image credit (call if generation failed).
-    toolcall_hook() -> bool: consume 1 tool call (connect-own-AI plans); return
-    False if the monthly tool-call limit is reached.
-    toolcall_refund_hook(): give back 1 tool call (call if the WP request failed).
-    balance_hook() -> dict: current {images, images_max, actions, actions_max,
-    has_own_key} so tools can warn the user when a balance is running low.
-    approval_hook(tool, args, summary, risk) -> id: queue a risky action for the
-    user to approve in the dashboard (used by request_approval)."""
-    token = base64.b64encode(f"{username}:{app_password.replace(' ', '')}".encode()).decode()
+    toolcall_hook() -> bool: consume 1 tool call; False if the monthly limit is reached.
+    (see the hook docs above - unchanged.)"""
+    if platform == "shopify":
+        headers = {"X-Shopify-Access-Token": access_token, "User-Agent": "wp-mcp/3.0"}
+    else:
+        token = base64.b64encode(f"{username}:{app_password.replace(' ', '')}".encode()).decode()
+        headers = {"Authorization": "Basic " + token, "User-Agent": "wp-mcp/3.0"}
     return {
+        "platform": platform,
         "site_url": site_url.rstrip("/"),
-        "base_headers": {"Authorization": "Basic " + token, "User-Agent": "wp-mcp/3.0"},
+        "shop_domain": shop_domain,
+        "base_headers": headers,
         "gemini_api_key": gemini_api_key or os.environ.get("GEMINI_API_KEY", ""),
         "user_id": user_id,
         "plan": plan or "free",
@@ -300,6 +309,65 @@ def _request(method, path, payload=None, params=None, raw_body=None, extra_heade
 
 def _v2(method, path, payload=None, params=None):
     return _request(method, "/wp/v2" + path, payload=payload, params=params)
+
+
+_SHOPIFY_API_VERSION = "2024-10"
+
+
+def _shopify_request(method, path, payload=None, params=None):
+    """Call the Shopify Admin REST API for the current tenant. `path` is like
+    '/products.json' or '/orders/123.json'. Uses the X-Shopify-Access-Token header from
+    the tenant config, consumes the tool-call budget (like _request), and surfaces Shopify
+    error bodies. Raises a friendly error if the current site isn't a Shopify store."""
+    cfg = _cfg()
+    if cfg.get("platform") != "shopify":
+        raise RuntimeError("This tool works on a Shopify store, but the current site isn't a "
+                           "Shopify store. Connect a Shopify store, or switch to it with use_site.")
+    shop = (cfg.get("shop_domain") or "").strip()
+    if not shop:
+        raise RuntimeError("No Shopify store domain for this tenant. Reconnect the store.")
+    # Tool-call budget (same as _request).
+    hook = cfg.get("toolcall_hook")
+    if hook is not None and not hook():
+        raise RuntimeError("Monthly tool-call limit reached for your plan. Upgrade in your "
+                           "wptaskify dashboard.")
+
+    def _refund():
+        rf = cfg.get("toolcall_refund_hook")
+        if hook is not None and rf is not None:
+            try:
+                rf()
+            except Exception:
+                pass
+
+    qs = ("?" + urllib.parse.urlencode(params)) if params else ""
+    url = f"https://{shop}/admin/api/{_SHOPIFY_API_VERSION}{path}{qs}"
+    headers = dict(cfg["base_headers"])
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = resp.read().decode()
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as e:
+        _refund()
+        raw = ""
+        try:
+            raw = e.read().decode()[:500]
+        except Exception:
+            pass
+        if e.code == 401:
+            raise RuntimeError("Shopify rejected the access token (401). Reconnect the store "
+                               "from your wptaskify dashboard.")
+        if e.code == 404:
+            raise RuntimeError(f"Shopify: not found (404). {raw}")
+        raise RuntimeError(f"Shopify API {e.code}: {raw}")
+    except Exception as e:  # noqa: BLE001
+        _refund()
+        raise RuntimeError(f"Shopify request failed: {type(e).__name__}: {str(e)[:200]}")
 
 
 def _slim_post(p):
@@ -5736,6 +5804,32 @@ def create_product_category(name: str, parent_id: int = 0, description: str = ""
 
 
 @mcp.tool()
+def update_product_category(category_id: int, name: str = "", description: str = "",
+                            parent_id: int = -1, slug: str = "", site: str = "") -> str:
+    """Edit a WooCommerce product category: rename, re-describe, re-parent or re-slug. Only
+    non-empty fields change. parent_id=-1 leaves the parent unchanged."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    payload = {}
+    if name:
+        payload["name"] = name
+    if description:
+        payload["description"] = description
+    if slug:
+        payload["slug"] = slug
+    if parent_id >= 0:
+        payload["parent"] = parent_id
+    if not payload:
+        return "Nothing to update."
+    c = _request("POST", f"/wc/v3/products/categories/{category_id}", payload=payload)
+    return json.dumps({"id": c.get("id"), "name": c.get("name"), "slug": c.get("slug"),
+                       "parent": c.get("parent")}, ensure_ascii=False)
+
+
+@mcp.tool()
 def delete_product_category(category_id: int, site: str = "") -> str:
     """Delete a WooCommerce product category (products keep existing, lose this category)."""
     _require_tier('paid')
@@ -5869,6 +5963,41 @@ def create_coupon(code: str, discount_type: str = "percent", amount: str = "",
 
 
 @mcp.tool()
+def update_coupon(coupon_id: int, code: str = "", discount_type: str = "", amount: str = "",
+                  expiry: str = "", usage_limit: int = -1, min_amount: str = "",
+                  free_shipping: str = "", site: str = "") -> str:
+    """Edit a WooCommerce coupon: change its code, discount_type (percent/fixed_cart/
+    fixed_product), amount, expiry (YYYY-MM-DD), usage_limit, min_amount, or free_shipping
+    ('yes'/'no'). Only provided fields change."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _woo_guard()
+    if g:
+        return g
+    payload = {}
+    if code:
+        payload["code"] = code
+    if discount_type:
+        payload["discount_type"] = discount_type
+    if amount:
+        payload["amount"] = str(amount)
+    if expiry:
+        payload["date_expires"] = expiry
+    if usage_limit >= 0:
+        payload["usage_limit"] = usage_limit
+    if min_amount:
+        payload["minimum_amount"] = str(min_amount)
+    if free_shipping in ("yes", "no"):
+        payload["free_shipping"] = (free_shipping == "yes")
+    if not payload:
+        return "Nothing to update."
+    c = _request("POST", f"/wc/v3/coupons/{coupon_id}", payload=payload)
+    return json.dumps({"id": c.get("id"), "code": c.get("code"),
+                       "type": c.get("discount_type"), "amount": c.get("amount")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
 def delete_coupon(coupon_id: int, site: str = "") -> str:
     """Delete a WooCommerce coupon permanently."""
     _require_tier('paid')
@@ -5905,6 +6034,452 @@ def store_report(period: str = "week", site: str = "") -> str:
     except Exception:
         pass
     return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+# ===========================================================================
+# SHOPIFY - manage a Shopify store (products, orders, blogs, discounts).
+# Works when the current connected "site" is a Shopify store (platform=shopify).
+# Auth = the store's Admin API access token (X-Shopify-Access-Token), stored when
+# the user connects the store in the dashboard. Uses the Admin REST API at
+# /admin/api/<version>/*. These tools are separate from the WordPress tools; use
+# use_site / the site param to target a specific store when a user has several.
+# ===========================================================================
+def _shop_guard():
+    """Empty string if the current tenant is a Shopify store, else a friendly error JSON."""
+    if _cfg().get("platform") == "shopify":
+        return ""
+    return json.dumps({
+        "error": "The current site isn't a Shopify store.",
+        "fix": "Connect a Shopify store in your wptaskify dashboard, or switch to it with "
+               "use_site if you have one connected.",
+    })
+
+
+def _slim_shopify_product(p):
+    v0 = (p.get("variants") or [{}])[0]
+    return {
+        "id": p.get("id"),
+        "title": p.get("title"),
+        "handle": p.get("handle"),
+        "status": p.get("status"),
+        "vendor": p.get("vendor"),
+        "product_type": p.get("product_type"),
+        "price": v0.get("price"),
+        "sku": v0.get("sku"),
+        "inventory_quantity": v0.get("inventory_quantity"),
+        "tags": p.get("tags"),
+        "image": (p.get("image") or {}).get("src") if p.get("image") else None,
+    }
+
+
+def _slim_shopify_order(o):
+    return {
+        "id": o.get("id"),
+        "name": o.get("name"),
+        "financial_status": o.get("financial_status"),
+        "fulfillment_status": o.get("fulfillment_status"),
+        "total_price": o.get("total_price"),
+        "currency": o.get("currency"),
+        "created_at": o.get("created_at"),
+        "customer": (f"{(o.get('customer') or {}).get('first_name','')} "
+                     f"{(o.get('customer') or {}).get('last_name','')}").strip()
+                    or o.get("email", ""),
+        "email": o.get("email"),
+        "line_items": [{"title": li.get("title"), "qty": li.get("quantity"),
+                        "price": li.get("price")} for li in (o.get("line_items") or [])],
+    }
+
+
+@mcp.tool()
+def shopify_status(site: str = "") -> str:
+    """Check whether the current connected store is a Shopify store and show a quick snapshot
+    (shop name, domain, currency, plan). Use this FIRST before other shopify_/product tools on
+    a Shopify store."""
+    _apply_site(site)
+    if _cfg().get("platform") != "shopify":
+        return json.dumps({"is_shopify": False,
+                           "hint": "The current site isn't a Shopify store. Connect one, or "
+                                   "use_site to switch to a connected store."})
+    shop = _shopify_request("GET", "/shop.json").get("shop", {})
+    return json.dumps({"is_shopify": True, "name": shop.get("name"),
+                       "domain": shop.get("myshopify_domain"), "currency": shop.get("currency"),
+                       "plan": shop.get("plan_display_name"), "email": shop.get("email")},
+                      indent=2, ensure_ascii=False)
+
+
+# ----- Shopify products -----
+@mcp.tool()
+def shopify_list_products(search: str = "", status: str = "any", limit: int = 20,
+                          site: str = "") -> str:
+    """List Shopify products (id, title, price, sku, inventory, status). `search` filters by
+    title; `status` = active/draft/archived/any."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    params = {"limit": min(limit, 100)}
+    if status and status != "any":
+        params["status"] = status
+    if search:
+        params["title"] = search
+    data = _shopify_request("GET", "/products.json", params=params)
+    return json.dumps([_slim_shopify_product(p) for p in (data.get("products") or [])],
+                      indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_get_product(product_id: int, site: str = "") -> str:
+    """Get a Shopify product's full detail: description (body_html), variants (price, sku,
+    inventory), images, tags, vendor and type."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    p = _shopify_request("GET", f"/products/{product_id}.json").get("product", {})
+    slim = _slim_shopify_product(p)
+    slim["body_html"] = p.get("body_html", "")
+    slim["variants"] = [{"id": v.get("id"), "title": v.get("title"), "price": v.get("price"),
+                         "sku": v.get("sku"), "inventory_quantity": v.get("inventory_quantity")}
+                        for v in (p.get("variants") or [])]
+    slim["images"] = [i.get("src") for i in (p.get("images") or [])]
+    return json.dumps(slim, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_create_product(title: str, body_html: str = "", price: str = "", sku: str = "",
+                           vendor: str = "", product_type: str = "", tags: str = "",
+                           inventory_quantity: int = -1, status: str = "draft",
+                           image_urls: str = "", site: str = "") -> str:
+    """Create a Shopify product. `price` is a string ('19.99'). `tags` comma-separated.
+    image_urls comma-separated public URLs. status defaults to draft (safe). Creates a single
+    default variant with the given price/sku/inventory."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    variant = {}
+    if price:
+        variant["price"] = str(price)
+    if sku:
+        variant["sku"] = sku
+    if inventory_quantity >= 0:
+        variant["inventory_management"] = "shopify"
+        variant["inventory_quantity"] = inventory_quantity
+    product = {"title": title, "status": status}
+    if body_html:
+        product["body_html"] = body_html
+    if vendor:
+        product["vendor"] = vendor
+    if product_type:
+        product["product_type"] = product_type
+    if tags:
+        product["tags"] = tags
+    if variant:
+        product["variants"] = [variant]
+    if image_urls:
+        product["images"] = [{"src": u.strip()} for u in image_urls.split(",") if u.strip()]
+    p = _shopify_request("POST", "/products.json", payload={"product": product}).get("product", {})
+    return json.dumps(_slim_shopify_product(p), indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_update_product(product_id: int, title: str = "", body_html: str = "",
+                           status: str = "", vendor: str = "", product_type: str = "",
+                           tags: str = "", price: str = "", site: str = "") -> str:
+    """Edit a Shopify product. Only non-empty fields change. `price` updates the FIRST
+    variant's price. status = active/draft/archived. tags comma-separated (replaces)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    product = {"id": product_id}
+    for k, v in (("title", title), ("body_html", body_html), ("status", status),
+                 ("vendor", vendor), ("product_type", product_type), ("tags", tags)):
+        if v:
+            product[k] = v
+    if price:
+        cur = _shopify_request("GET", f"/products/{product_id}.json").get("product", {})
+        vid = ((cur.get("variants") or [{}])[0]).get("id")
+        if vid:
+            product["variants"] = [{"id": vid, "price": str(price)}]
+    if len(product) == 1:
+        return "Nothing to update."
+    p = _shopify_request("PUT", f"/products/{product_id}.json",
+                         payload={"product": product}).get("product", {})
+    return json.dumps(_slim_shopify_product(p), indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_delete_product(product_id: int, site: str = "") -> str:
+    """Delete a Shopify product permanently."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    _shopify_request("DELETE", f"/products/{product_id}.json")
+    return json.dumps({"id": product_id, "result": "deleted"})
+
+
+@mcp.tool()
+def shopify_generate_product_description(product_id: int, tone: str = "persuasive",
+                                         keywords: str = "", apply: bool = False,
+                                         site: str = "") -> str:
+    """Generate a compelling product description with AI from the product's title, vendor and
+    type. `tone` guides style; `keywords` are SEO terms to work in. apply=False PREVIEWS;
+    apply=True saves it as the product's body_html."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    p = _shopify_request("GET", f"/products/{product_id}.json").get("product", {})
+    title = p.get("title", "")
+    prompt = (f"Write an e-commerce product description (clean HTML: 2-3 short paragraphs + a "
+              f"bullet list of key benefits) for '{title}'. "
+              f"{('Vendor: ' + p.get('vendor','') + '. ') if p.get('vendor') else ''}"
+              f"{('Type: ' + p.get('product_type','') + '. ') if p.get('product_type') else ''}"
+              f"Tone: {tone}. "
+              f"{('Work in these keywords naturally: ' + keywords + '. ') if keywords else ''}"
+              f"Be accurate; do not invent specs. Return ONLY the HTML.")
+    html = _gemini_text(prompt).strip()
+    if not apply:
+        return json.dumps({"mode": "PREVIEW", "product_id": product_id, "body_html": html},
+                          ensure_ascii=False)
+    _shopify_request("PUT", f"/products/{product_id}.json",
+                     payload={"product": {"id": product_id, "body_html": html}})
+    return json.dumps({"mode": "APPLIED", "product_id": product_id, "chars": len(html)},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_generate_product_image(product_id: int, prompt: str = "", site: str = "") -> str:
+    """Generate a product image with Gemini and add it to a Shopify product. If `prompt` is
+    empty, one is built from the product title. The image is uploaded to the product's gallery."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    p = _shopify_request("GET", f"/products/{product_id}.json").get("product", {})
+    title = p.get("title", "product")
+    if not prompt:
+        prompt = (f"A clean, professional product photo of {title} on a plain white studio "
+                  f"background, e-commerce style, soft shadow, high detail.")
+    img = _gemini_generate_image(prompt)
+    b64 = base64.b64encode(img).decode()
+    res = _shopify_request("POST", f"/products/{product_id}/images.json",
+                           payload={"image": {"attachment": b64}})
+    src = (res.get("image") or {}).get("src")
+    return json.dumps({"product_id": product_id, "image_url": src}, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_update_inventory(variant_id: int, price: str = "", sku: str = "",
+                             inventory_quantity: int = -1, site: str = "") -> str:
+    """Update a product variant's price, sku, or inventory quantity (get variant ids from
+    shopify_get_product)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    variant = {"id": variant_id}
+    if price:
+        variant["price"] = str(price)
+    if sku:
+        variant["sku"] = sku
+    if inventory_quantity >= 0:
+        variant["inventory_management"] = "shopify"
+        variant["inventory_quantity"] = inventory_quantity
+    if len(variant) == 1:
+        return "Provide price, sku, or inventory_quantity."
+    v = _shopify_request("PUT", f"/variants/{variant_id}.json",
+                         payload={"variant": variant}).get("variant", {})
+    return json.dumps({"id": v.get("id"), "price": v.get("price"), "sku": v.get("sku"),
+                       "inventory_quantity": v.get("inventory_quantity")}, ensure_ascii=False)
+
+
+# ----- Shopify orders (read + status) -----
+@mcp.tool()
+def shopify_list_orders(status: str = "any", financial_status: str = "", limit: int = 20,
+                        site: str = "") -> str:
+    """List Shopify orders (name, status, total, customer, items). `status` = open/closed/
+    cancelled/any; `financial_status` = paid/pending/refunded/etc."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    params = {"limit": min(limit, 100), "status": status}
+    if financial_status:
+        params["financial_status"] = financial_status
+    data = _shopify_request("GET", "/orders.json", params=params)
+    return json.dumps([_slim_shopify_order(o) for o in (data.get("orders") or [])],
+                      indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_get_order(order_id: int, site: str = "") -> str:
+    """Get a Shopify order's full detail: line items, customer, shipping/billing, totals,
+    payment and fulfillment status."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    o = _shopify_request("GET", f"/orders/{order_id}.json").get("order", {})
+    slim = _slim_shopify_order(o)
+    slim["shipping_address"] = o.get("shipping_address")
+    slim["subtotal_price"] = o.get("subtotal_price")
+    slim["total_tax"] = o.get("total_tax")
+    slim["tags"] = o.get("tags")
+    return json.dumps(slim, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_fulfill_order(order_id: int, notify_customer: bool = True, site: str = "") -> str:
+    """Mark a Shopify order as fulfilled (ships all items in the default location). Set
+    notify_customer=False to skip the shipping email."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    # Fulfillment orders API (2024-10): fulfill all fulfillment orders for this order.
+    fos = _shopify_request("GET", f"/orders/{order_id}/fulfillment_orders.json")
+    ids = [fo.get("id") for fo in (fos.get("fulfillment_orders") or [])]
+    if not ids:
+        return json.dumps({"error": "No open fulfillment orders (already fulfilled?)."})
+    payload = {"fulfillment": {
+        "line_items_by_fulfillment_order": [{"fulfillment_order_id": i} for i in ids],
+        "notify_customer": notify_customer}}
+    res = _shopify_request("POST", "/fulfillments.json", payload=payload)
+    return json.dumps({"order_id": order_id,
+                       "fulfillment_status": (res.get("fulfillment") or {}).get("status",
+                                                                                "submitted")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_cancel_order(order_id: int, reason: str = "customer", site: str = "") -> str:
+    """Cancel a Shopify order. reason = customer / inventory / fraud / declined / other."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    o = _shopify_request("POST", f"/orders/{order_id}/cancel.json",
+                         payload={"reason": reason}).get("order", {})
+    return json.dumps({"id": o.get("id"), "cancelled_at": o.get("cancelled_at")}, ensure_ascii=False)
+
+
+# ----- Shopify blogs / content -----
+@mcp.tool()
+def shopify_list_blogs(site: str = "") -> str:
+    """List the Shopify store's blogs (id, title, handle). A store can have several blogs;
+    you post articles into one of them."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", "/blogs.json")
+    return json.dumps([{"id": b.get("id"), "title": b.get("title"), "handle": b.get("handle")}
+                       for b in (data.get("blogs") or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_create_article(blog_id: int, title: str, body_html: str, author: str = "",
+                           tags: str = "", published: bool = False, site: str = "") -> str:
+    """Publish a blog article to a Shopify blog (get blog_id from shopify_list_blogs). body_html
+    is the article HTML. published=False saves it as a draft (safe). tags comma-separated."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    article = {"title": title, "body_html": body_html, "published": published}
+    if author:
+        article["author"] = author
+    if tags:
+        article["tags"] = tags
+    a = _shopify_request("POST", f"/blogs/{blog_id}/articles.json",
+                         payload={"article": article}).get("article", {})
+    return json.dumps({"id": a.get("id"), "title": a.get("title"), "handle": a.get("handle"),
+                       "published": bool(a.get("published_at"))}, ensure_ascii=False)
+
+
+# ----- Shopify discounts (price rules) -----
+@mcp.tool()
+def shopify_create_discount(code: str, value: str, value_type: str = "percentage",
+                            starts_at: str = "", ends_at: str = "", usage_limit: int = 0,
+                            site: str = "") -> str:
+    """Create a Shopify discount code. value_type = percentage or fixed_amount. `value` is the
+    amount (e.g. '10' for 10% or a fixed amount; stored negative automatically). Optional
+    starts_at/ends_at (YYYY-MM-DD) and usage_limit."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    try:
+        amt = -abs(float(value))
+    except (TypeError, ValueError):
+        return json.dumps({"error": "value must be a number like '10'."})
+    rule = {"title": code, "target_type": "line_item", "target_selection": "all",
+            "allocation_method": "across", "value_type": value_type, "value": str(amt),
+            "customer_selection": "all",
+            "starts_at": (starts_at + "T00:00:00Z") if starts_at else _iso_now_z()}
+    if ends_at:
+        rule["ends_at"] = ends_at + "T23:59:59Z"
+    if usage_limit:
+        rule["usage_limit"] = usage_limit
+    pr = _shopify_request("POST", "/price_rules.json",
+                          payload={"price_rule": rule}).get("price_rule", {})
+    prid = pr.get("id")
+    dc = _shopify_request("POST", f"/price_rules/{prid}/discount_codes.json",
+                          payload={"discount_code": {"code": code}}).get("discount_code", {})
+    return json.dumps({"price_rule_id": prid, "code": dc.get("code"),
+                       "value_type": value_type, "value": value}, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_list_discounts(site: str = "") -> str:
+    """List the store's discount price rules (id, title, value type, value, dates)."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    data = _shopify_request("GET", "/price_rules.json", params={"limit": 50})
+    return json.dumps([{"id": r.get("id"), "title": r.get("title"),
+                        "value_type": r.get("value_type"), "value": r.get("value"),
+                        "starts_at": r.get("starts_at"), "ends_at": r.get("ends_at")}
+                       for r in (data.get("price_rules") or [])], indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def shopify_delete_discount(price_rule_id: int, site: str = "") -> str:
+    """Delete a Shopify discount (price rule) and its codes."""
+    _require_tier('paid')
+    _apply_site(site)
+    g = _shop_guard()
+    if g:
+        return g
+    _shopify_request("DELETE", f"/price_rules/{price_rule_id}.json")
+    return json.dumps({"id": price_rule_id, "result": "deleted"})
+
+
+def _iso_now_z():
+    """Current UTC time as an ISO8601 Z string (for Shopify starts_at). Uses the WP site's
+    time via a cheap call is overkill; a plain formatted now is fine for a start time."""
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------

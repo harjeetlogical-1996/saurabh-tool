@@ -1002,6 +1002,25 @@ def _validate_wp(site_url, username, app_password):
         return False, str(e)[:80]
 
 
+def _validate_shopify(shop_domain, access_token):
+    """Validate a Shopify Admin API token by fetching the shop. Returns (ok, shop_name/err)."""
+    dom = (shop_domain or "").strip().lower().replace("https://", "").replace("http://", "").rstrip("/")
+    if not dom or ".myshopify.com" not in dom:
+        return False, "Enter your .myshopify.com store domain (e.g. my-store.myshopify.com)."
+    url = f"https://{dom}/admin/api/2024-10/shop.json"
+    req = urllib.request.Request(url, headers={"X-Shopify-Access-Token": (access_token or "").strip()})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            shop = json.load(r).get("shop", {})
+            return True, shop.get("name", dom)
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return False, "Shopify rejected the access token. Check the Admin API token."
+        return False, f"Shopify HTTP {e.code}"
+    except Exception as e:
+        return False, str(e)[:80]
+
+
 async def _handle_admin(path, method, headers, query, receive, send):
     """Owner admin panel router. All paths are under admin_mod.base_path()."""
     b = admin_mod.base_path()
@@ -2881,6 +2900,37 @@ async def asgi_app(scope, receive, send):
             _notify_site_connected(uid, f.get("site_url", ""))
             await _send_html(send, 302, "", [(b"location", b"/dashboard?added=1")])
             return
+        if path == "/shopify/connect" and method == "POST":
+            uid = _get_active_uid(headers)
+            if not uid:
+                await _send_html(send, 302, "", [(b"location", b"/login")])
+                return
+            f = _form(await _read_body(receive))
+            if not _csrf_ok(headers, f):
+                await _send_html(send, 302, "", [(b"location",
+                    b"/dashboard?err=Session+expired,+please+retry#addsite")])
+                return
+            allowed, limit, current = db.can_add_site(uid)
+            if not allowed:
+                msg = (f"Your plan includes {limit} site{'s' if limit != 1 else ''} and you've "
+                       f"connected {current}. Upgrade to add more.")
+                await _send_html(send, 302, "", [(b"location",
+                    ("/dashboard?err=" + urllib.parse.quote(msg) + "#plan").encode())])
+                return
+            _dom = f.get("shop_domain", "")
+            _tok = f.get("access_token", "")
+            ok, info = _validate_shopify(_dom, _tok)
+            if not ok:
+                await _send_html(send, 302, "", [(b"location",
+                    ("/dashboard?err=" + urllib.parse.quote(str(info)) + "#addsite").encode())])
+                return
+            _sid = db.add_shopify_store(uid, _dom, _tok, max_sites=limit)
+            if not _sid:
+                await _send_html(send, 302, "", [(b"location",
+                    ("/dashboard?err=" + urllib.parse.quote("Site limit reached.") + "#plan").encode())])
+                return
+            await _send_html(send, 302, "", [(b"location", b"/dashboard?added=1#sites")])
+            return
         if path == "/sites/delete" and method == "POST":
             uid = _get_active_uid(headers)
             if not uid:
@@ -3002,7 +3052,9 @@ async def asgi_app(scope, receive, send):
                 return
             try:
                 tcfg = server.make_tenant_config(
-                    site["site_url"], site["wp_username"], site["app_password"], user_id=uid)
+                    site["site_url"], site.get("wp_username",""), site.get("app_password",""),
+                    platform=site.get("platform","wordpress"), shop_domain=site.get("shop_domain",""),
+                    access_token=site.get("access_token",""), user_id=uid)
                 server.current_tenant.set(tcfg)
                 result = json.loads(server.ai_seo_score(limit=50))
                 # Save a snapshot so the weekly report card can show before -> after.
@@ -3105,7 +3157,9 @@ async def asgi_app(scope, receive, send):
 
             own_key = db.get_user_gemini_key(uid) or ""
             tcfg = server.make_tenant_config(
-                site["site_url"], site["wp_username"], site["app_password"],
+                site["site_url"], site.get("wp_username",""), site.get("app_password",""),
+                platform=site.get("platform","wordpress"), shop_domain=site.get("shop_domain",""),
+                access_token=site.get("access_token",""),
                 gemini_api_key=own_key, user_id=uid,
                 credit_hook=(lambda u=uid: db.try_consume_credit(u)),
                 credit_refund_hook=(lambda u=uid: db.refund_credit(u, 1)),
@@ -3171,7 +3225,9 @@ async def asgi_app(scope, receive, send):
                         db.rename_conversation(uid, conv_id, last_user[:60])
             own_key = db.get_user_gemini_key(uid) or ""
             tcfg = server.make_tenant_config(
-                site["site_url"], site["wp_username"], site["app_password"],
+                site["site_url"], site.get("wp_username",""), site.get("app_password",""),
+                platform=site.get("platform","wordpress"), shop_domain=site.get("shop_domain",""),
+                access_token=site.get("access_token",""),
                 gemini_api_key=own_key, user_id=uid,
                 credit_hook=(lambda u=uid: db.try_consume_credit(u)),
                 credit_refund_hook=(lambda u=uid: db.refund_credit(u, 1)),
@@ -3315,7 +3371,11 @@ async def asgi_app(scope, receive, send):
                         except Exception:
                             _plan = ""
                         tenant_cfg = server.make_tenant_config(
-                            site["site_url"], site["wp_username"], site["app_password"],
+                            site["site_url"], site.get("wp_username", ""),
+                            site.get("app_password", ""),
+                            platform=site.get("platform", "wordpress"),
+                            shop_domain=site.get("shop_domain", ""),
+                            access_token=site.get("access_token", ""),
                             gemini_api_key=own_key, user_id=tid, plan=_plan,
                             credit_hook=(lambda uid=tid: db.try_consume_credit(uid)),
                             credit_refund_hook=(lambda uid=tid: db.refund_credit(uid, 1)),

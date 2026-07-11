@@ -239,6 +239,22 @@ def _create_schema():
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_sites_user ON wordpress_sites(user_id);
         """)
+        # Multi-platform support: the sites table now holds WordPress AND Shopify stores.
+        # WordPress rows keep using wp_username + app_password_enc (unchanged). Shopify rows
+        # set platform='shopify' + shop_domain + access_token_enc. Existing rows default to
+        # 'wordpress' so nothing about current WP users changes. app_password columns are made
+        # nullable so a Shopify row (which has no app password) can be inserted.
+        for _col, _ddl in [
+            ("platform", "ALTER TABLE wordpress_sites ADD COLUMN IF NOT EXISTS platform text NOT NULL DEFAULT 'wordpress'"),
+            ("shop_domain", "ALTER TABLE wordpress_sites ADD COLUMN IF NOT EXISTS shop_domain text NOT NULL DEFAULT ''"),
+            ("access_token_enc", "ALTER TABLE wordpress_sites ADD COLUMN IF NOT EXISTS access_token_enc bytea"),
+            ("access_token_nonce", "ALTER TABLE wordpress_sites ADD COLUMN IF NOT EXISTS access_token_nonce bytea"),
+        ]:
+            conn.execute(_ddl)
+        # Make the WP-only columns nullable so Shopify rows (no app password) can insert.
+        conn.execute("ALTER TABLE wordpress_sites ALTER COLUMN wp_username DROP NOT NULL")
+        conn.execute("ALTER TABLE wordpress_sites ALTER COLUMN app_password_enc DROP NOT NULL")
+        conn.execute("ALTER TABLE wordpress_sites ALTER COLUMN app_password_nonce DROP NOT NULL")
         # Contact-form leads / queries (public /contact page).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS contact_messages (
@@ -614,6 +630,32 @@ def add_site(user_id: str, site_url: str, wp_username: str, app_password: str,
     return sid
 
 
+def add_shopify_store(user_id: str, shop_domain: str, access_token: str,
+                      max_sites: int = None) -> str:
+    """Encrypt + store a Shopify store for a user (platform='shopify'). shop_domain is like
+    'my-store.myshopify.com'. Returns site_id, or None if max_sites is reached. Shares the
+    sites table + per-user site limit with WordPress sites."""
+    ct, nonce = encrypt_secret(access_token.strip())
+    sid = str(uuid.uuid4())
+    dom = shop_domain.strip().lower().replace("https://", "").replace("http://", "").rstrip("/")
+    with _pool.connection() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(user_id),))
+        if max_sites is not None:
+            n = conn.execute("SELECT count(*) FROM wordpress_sites "
+                             "WHERE user_id=%s AND status='active'", (user_id,)).fetchone()[0]
+            if int(n) >= int(max_sites):
+                return None
+        conn.execute("UPDATE wordpress_sites SET is_primary = false WHERE user_id = %s", (user_id,))
+        conn.execute(
+            """INSERT INTO wordpress_sites
+               (id, user_id, platform, site_url, shop_domain, access_token_enc,
+                access_token_nonce, is_primary)
+               VALUES (%s, %s, 'shopify', %s, %s, %s, %s, true)""",
+            (sid, user_id, f"https://{dom}", dom, ct, nonce),
+        )
+    return sid
+
+
 def set_active_site(user_id: str, site_id):
     """Remember which site the AI is currently working on (persists across MCP
     requests). Pass None to clear (fall back to the primary/newest site)."""
@@ -622,40 +664,44 @@ def set_active_site(user_id: str, site_id):
                      (site_id, user_id))
 
 
-def get_primary_site(user_id: str):
-    """Return the site the AI should act on WITH decrypted app password (runtime
-    only): the user's chosen active site if set and still valid, otherwise the
-    primary/newest site. Returns {site_url, wp_username, app_password} or None."""
-    with _pool.connection() as conn:
-        # 1) Honor an explicitly-chosen active site (set via use_site).
-        active_id = conn.execute(
-            "SELECT active_site_id FROM users WHERE id = %s", (user_id,)
-        ).fetchone()
-        if active_id and active_id[0]:
-            row = conn.execute(
-                """SELECT site_url, wp_username, app_password_enc, app_password_nonce
-                   FROM wordpress_sites
-                   WHERE id = %s AND user_id = %s AND status = 'active'""",
-                (active_id[0], user_id),
-            ).fetchone()
-            if row:
-                return {"site_url": row[0], "wp_username": row[1],
-                        "app_password": decrypt_secret(row[2], row[3])}
-        # 2) Fall back to primary/newest.
-        row = conn.execute(
-            """SELECT site_url, wp_username, app_password_enc, app_password_nonce
-               FROM wordpress_sites
-               WHERE user_id = %s AND status = 'active'
-               ORDER BY is_primary DESC, created_at DESC LIMIT 1""",
-            (user_id,),
-        ).fetchone()
+_SITE_COLS = ("site_url, wp_username, app_password_enc, app_password_nonce, "
+              "platform, shop_domain, access_token_enc, access_token_nonce")
+
+
+def _parse_site_row(row):
+    """Turn a _SITE_COLS row into a platform-aware creds dict (secrets decrypted).
+    WordPress -> {platform, site_url, wp_username, app_password}. Shopify ->
+    {platform, site_url, shop_domain, access_token}."""
     if not row:
         return None
-    return {
-        "site_url": row[0],
-        "wp_username": row[1],
-        "app_password": decrypt_secret(row[2], row[3]),
-    }
+    platform = row[4] or "wordpress"
+    if platform == "shopify":
+        return {"platform": "shopify", "site_url": row[0], "shop_domain": row[5],
+                "access_token": decrypt_secret(row[6], row[7]) if row[6] is not None else ""}
+    return {"platform": "wordpress", "site_url": row[0], "wp_username": row[1],
+            "app_password": decrypt_secret(row[2], row[3]) if row[2] is not None else ""}
+
+
+def get_primary_site(user_id: str):
+    """Return the site/store the AI should act on WITH decrypted credentials (runtime only):
+    the user's chosen active site if set and still valid, otherwise the primary/newest.
+    Platform-aware: WordPress -> app_password; Shopify -> access_token. Returns dict or None."""
+    with _pool.connection() as conn:
+        active_id = conn.execute(
+            "SELECT active_site_id FROM users WHERE id = %s", (user_id,)).fetchone()
+        if active_id and active_id[0]:
+            row = conn.execute(
+                f"SELECT {_SITE_COLS} FROM wordpress_sites "
+                "WHERE id = %s AND user_id = %s AND status = 'active'",
+                (active_id[0], user_id)).fetchone()
+            if row:
+                return _parse_site_row(row)
+        row = conn.execute(
+            f"SELECT {_SITE_COLS} FROM wordpress_sites "
+            "WHERE user_id = %s AND status = 'active' "
+            "ORDER BY is_primary DESC, created_at DESC LIMIT 1",
+            (user_id,)).fetchone()
+    return _parse_site_row(row)
 
 
 def delete_site_by_url(site_url: str) -> int:
@@ -823,53 +869,50 @@ def get_site_by_id(user_id: str, site_id: str):
 
 
 def get_site_by_ref(user_id: str, ref: str):
-    """Resolve one of the user's sites (decrypted creds) by a flexible reference:
-    the site id, the exact site_url, or a domain substring (e.g. 'buyfrombest').
-    Returns {id, site_url, wp_username, app_password} or None. Used so the AI can
-    target a specific site when the user has several."""
+    """Resolve one of the user's sites/stores (decrypted creds) by a flexible reference:
+    the site id, the exact site_url, the shop_domain, or a domain substring. Platform-aware:
+    returns {id, platform, site_url, wp_username/app_password} for WordPress or
+    {id, platform, site_url, shop_domain, access_token} for Shopify. None if no match."""
     ref = (ref or "").strip()
     if not ref:
         return None
     with _pool.connection() as conn:
         rows = conn.execute(
-            """SELECT id, site_url, wp_username, app_password_enc, app_password_nonce
-               FROM wordpress_sites WHERE user_id = %s AND status = 'active'
-               ORDER BY is_primary DESC, created_at DESC""",
-            (user_id,),
-        ).fetchall()
+            f"SELECT id, {_SITE_COLS} FROM wordpress_sites "
+            "WHERE user_id = %s AND status = 'active' "
+            "ORDER BY is_primary DESC, created_at DESC",
+            (user_id,)).fetchall()
     if not rows:
         return None
     low = ref.lower().rstrip("/")
-    # 1) exact id  2) exact url  3) domain substring
     best = None
     for r in rows:
-        sid, url = str(r[0]), (r[1] or "")
-        u = url.lower().rstrip("/")
-        if sid == ref:
-            best = r; break
-        if u == low:
+        sid, url, dom = str(r[0]), (r[1] or ""), (r[6] or "")
+        if sid == ref or url.lower().rstrip("/") == low or dom.lower() == low:
             best = r; break
     if best is None:
         for r in rows:
-            if low in (r[1] or "").lower():
+            if low in (r[1] or "").lower() or low in (r[6] or "").lower():
                 best = r; break
     if best is None:
         return None
-    return {"id": str(best[0]), "site_url": best[1], "wp_username": best[2],
-            "app_password": decrypt_secret(best[3], best[4])}
+    parsed = _parse_site_row(best[1:])   # drop the id, parse the _SITE_COLS part
+    parsed["id"] = str(best[0])
+    return parsed
 
 
 def list_user_sites(user_id: str):
-    """List a user's sites (NO password). For dashboard display."""
+    """List a user's sites/stores (NO secrets). For dashboard display. Includes platform."""
     with _pool.connection() as conn:
         rows = conn.execute(
-            """SELECT id, site_url, wp_username, is_primary, status, created_at
+            """SELECT id, site_url, wp_username, is_primary, status, created_at,
+                      platform, shop_domain
                FROM wordpress_sites WHERE user_id = %s ORDER BY created_at DESC""",
-            (user_id,),
-        ).fetchall()
+            (user_id,)).fetchall()
     return [
-        {"id": str(r[0]), "site_url": r[1], "wp_username": r[2],
-         "is_primary": r[3], "status": r[4], "created_at": str(r[5])}
+        {"id": str(r[0]), "site_url": r[1], "wp_username": r[2] or "",
+         "is_primary": r[3], "status": r[4], "created_at": str(r[5]),
+         "platform": r[6] or "wordpress", "shop_domain": r[7] or ""}
         for r in rows
     ]
 

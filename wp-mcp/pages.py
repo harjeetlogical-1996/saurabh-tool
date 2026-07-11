@@ -5086,24 +5086,30 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
     plan_max_disp = _fmt_credits(plan_max)
 
     if sites:
-        items = "".join(
-            f'<div class=site-item>'
-            f'<div class=ico>{_icon("<rect width=18 height=18 x=3 y=3 rx=2/><path d=\'M3 9h18\'/>")}</div>'
-            f'<div class=meta><div class=url>{_e_html(s["site_url"])}</div>'
-            f'<div class=usr>{_e_html(s["wp_username"])}</div></div>'
-            f'<span class="pill ok">{_e_html(s["status"])}</span>'
-            f'<form method=post action=/sites/delete style=margin:0 '
-            f'onsubmit="return confirm(\'Remove this site? Your WordPress site is not affected - '
-            f'it just disconnects from wptaskify.\')">'
-            f'<input type=hidden name=site_id value="{s["id"]}">'
-            f'<button type=submit class=site-remove title="Remove site">'
-            f'{_icon("<path d=\'M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\'/>")}'
-            f'</button></form>'
-            f'</div>'
-            for s in sites)
+        def _site_row(s):
+            is_shop = s.get("platform") == "shopify"
+            plat_badge = ('<span class="pill" style="background:#96bf48;color:#fff">Shopify</span>'
+                          if is_shop else '<span class=pill>WordPress</span>')
+            sub = _e_html(s.get("shop_domain") or "") if is_shop else _e_html(s.get("wp_username") or "")
+            return (
+                f'<div class=site-item>'
+                f'<div class=ico>{_icon("<rect width=18 height=18 x=3 y=3 rx=2/><path d=\'M3 9h18\'/>")}</div>'
+                f'<div class=meta><div class=url>{_e_html(s["site_url"])}</div>'
+                f'<div class=usr>{sub}</div></div>'
+                f'{plat_badge}'
+                f'<span class="pill ok">{_e_html(s["status"])}</span>'
+                f'<form method=post action=/sites/delete style=margin:0 '
+                f'onsubmit="return confirm(\'Remove this site/store? It just disconnects from '
+                f'wptaskify - your site is not affected.\')">'
+                f'<input type=hidden name=site_id value="{s["id"]}">'
+                f'<button type=submit class=site-remove title="Remove">'
+                f'{_icon("<path d=\'M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\'/>")}'
+                f'</button></form>'
+                f'</div>')
+        items = "".join(_site_row(s) for s in sites)
     else:
-        items = ('<div class=empty>No site connected yet. Add your WordPress site below '
-                 '- then you can run it from any AI.</div>')
+        items = ('<div class=empty>No site connected yet. Add your WordPress site or Shopify '
+                 'store below - then you can run it from any AI.</div>')
     fl = f'<div class="alert {"ok" if flash_ok else "err"}">{_e_html(flash)}</div>' if flash else ""
 
     copy_btn = ('<button class="btn btn-ghost" style="padding:8px 14px;font-size:.85rem" '
@@ -5301,6 +5307,27 @@ def dashboard(sites, public_url, account=None, flash="", flash_ok=False, email="
       <a class="btn btn-primary btn-lg" href="{plugin_url}">Download the plugin</a>
       <button class="btn btn-ghost" onclick="showSec('plugin')">Setup guide</button>
     </div>
+  </div>
+
+  <div class=panel>
+    <h2>Or connect a Shopify store</h2>
+    <p class=hint>Running a Shopify store? Connect it and let your AI manage products, orders,
+    blogs and discounts - the same way it runs WordPress.</p>
+    <ol class=steps>
+      <li>In Shopify admin, go to <strong>Settings &rarr; Apps and sales channels &rarr; Develop apps</strong> and create a custom app.</li>
+      <li>Under <strong>Admin API access scopes</strong>, allow products, orders, content and discounts, then <strong>Install</strong> the app.</li>
+      <li>Copy the <strong>Admin API access token</strong> (starts with <code>shpat_</code>) and paste it below with your store domain.</li>
+    </ol>
+    <form method=post action=/shopify/connect class=set-form style="margin-top:12px">
+      <input type=hidden name=csrf value="{csrf}">
+      <div class=field><label for=shopdom>Store domain</label>
+      <input id=shopdom name=shop_domain type=text placeholder="my-store.myshopify.com" required
+        style="width:100%;padding:11px 14px;border:1px solid var(--border-hi);border-radius:10px;background:var(--surface2);color:var(--fg)"></div>
+      <div class=field style="margin-top:10px"><label for=shoptok>Admin API access token</label>
+      <input id=shoptok name=access_token type=password autocomplete=new-password placeholder="shpat_..." required
+        style="width:100%;padding:11px 14px;border:1px solid var(--border-hi);border-radius:10px;background:var(--surface2);color:var(--fg)"></div>
+      <button class="btn btn-primary" type=submit style="margin-top:12px">Connect Shopify store</button>
+    </form>
   </div>
 </section>
 
