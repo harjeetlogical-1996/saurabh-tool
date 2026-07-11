@@ -1175,7 +1175,7 @@ def landing(logged_in=False, country=""):
     own_ai_plans = [
         ("", "Free", "$0", "₹0", "/mo", False, "Start free",
          ["1 WordPress site", "100 AI actions / month", "5 AI images / month",
-          "Read-only SEO tools", "Use your own Claude or ChatGPT"]),
+          "Read-only SEO tools", "Community support"]),
     ]
     # India-only "Mini" plan: a low-cost entry tier with smaller limits.
     if is_india:
@@ -1415,7 +1415,9 @@ subscription, and nothing goes live without your approval.</p>
 </div>
 </div></section>
 
-<!-- CLIENTS / TRUSTED BY - drop site screenshots or logos here -->
+<!-- CLIENTS / TRUSTED BY - HIDDEN until real client screenshots are ready.
+     To bring back: remove the surrounding comment markers and drop real screenshots
+     into each .cli-shot (replace the <span>Add screenshot</span> with an <img>).
 <section class=section id=clients style="background:var(--bg2)"><div class=wrap>
 <h2 class=reveal>Sites running on wptaskify</h2>
 <p class="sub reveal">Real WordPress sites managed with AI through wptaskify.</p>
@@ -1438,6 +1440,8 @@ subscription, and nothing goes live without your approval.</p>
   </a>
 </div>
 </div></section>
+-->
+
 
 <section class=section id=pricing><div class=wrap>
 <h2 class=reveal>Simple pricing</h2>
