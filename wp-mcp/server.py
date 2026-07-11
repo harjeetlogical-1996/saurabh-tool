@@ -331,11 +331,13 @@ def list_posts(search: str = "", status: str = "publish,draft", per_page: int = 
 
 
 @mcp.tool()
-def get_post(post_id: int, site: str = "") -> str:
+def get_post(post_id: int, post_type: str = "", site: str = "") -> str:
     """Get one post's FULL raw content (HTML) + title, excerpt, status, categories,
-    tags, featured image id. Read this before editing."""
+    tags, featured image id. Read this before editing. For a CUSTOM post type (e.g.
+    'service'), pass post_type so it reads from the right endpoint - otherwise only
+    normal posts work."""
     _apply_site(site)
-    p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
+    p = _v2("GET", f"/{_pt_base(post_type)}/{post_id}", params={"context": "edit"})
     return json.dumps({
         "id": p.get("id"),
         "title": (p.get("title") or {}).get("raw", ""),
@@ -468,6 +470,15 @@ def _rest_base_for_type(post_type):
         return rb
     except Exception:
         return post_type
+
+
+def _pt_base(post_type):
+    """REST base for a content tool's optional `post_type` param. Empty -> 'posts'
+    (default), so existing calls are unchanged; 'service' -> 'services' etc. This is what
+    lets the read/SEO/audit tools work on custom post types, not just normal posts."""
+    if not post_type or post_type == "post":
+        return "posts"
+    return _rest_base_for_type(post_type)
 
 
 def _tax_rest_bases(post_type):
@@ -741,11 +752,12 @@ def _content_text(raw_html):
 
 
 @mcp.tool()
-def get_post_schema(post_id: int, site: str = "") -> str:
+def get_post_schema(post_id: int, post_type: str = "", site: str = "") -> str:
     """Extract ONLY the JSON-LD schema block(s) from a post's content.
-    Use this to read/inspect a post's structured data without the full article."""
+    Use this to read/inspect a post's structured data without the full article.
+    For a CUSTOM post type (e.g. 'service'), pass post_type."""
     _apply_site(site)
-    p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
+    p = _v2("GET", f"/{_pt_base(post_type)}/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     blocks = _SCHEMA_RE.findall(raw)
     if not blocks:
@@ -756,13 +768,15 @@ def get_post_schema(post_id: int, site: str = "") -> str:
 
 
 @mcp.tool()
-def update_post_schema(post_id: int, new_schema_script: str, site: str = "") -> str:
+def update_post_schema(post_id: int, new_schema_script: str, post_type: str = "", site: str = "") -> str:
     """Replace ONLY the JSON-LD schema block in a post, leaving the article body
     untouched. `new_schema_script` must be a full <script type="application/ld+json">
-    ... </script> tag. If the post has no schema yet, it is appended at the end."""
+    ... </script> tag. If the post has no schema yet, it is appended at the end.
+    For a CUSTOM post type (e.g. 'service'), pass post_type."""
     _require_tier('paid')
     _apply_site(site)
-    p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
+    _base = _pt_base(post_type)
+    p = _v2("GET", f"/{_base}/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     if _SCHEMA_RE.search(raw):
         new_raw = _SCHEMA_RE.sub(lambda _m: new_schema_script, raw, count=1)
@@ -770,25 +784,27 @@ def update_post_schema(post_id: int, new_schema_script: str, site: str = "") -> 
     else:
         new_raw = raw + "\n\n" + new_schema_script
         action = "appended"
-    _v2("POST", f"/posts/{post_id}", payload={"content": new_raw})
+    _v2("POST", f"/{_base}/{post_id}", payload={"content": new_raw})
     return json.dumps({"post_id": post_id, "schema": action})
 
 
 @mcp.tool()
-def update_post_body_keep_schema(post_id: int, new_content: str, site: str = "") -> str:
+def update_post_body_keep_schema(post_id: int, new_content: str, post_type: str = "", site: str = "") -> str:
     """Replace the article body but PRESERVE the existing JSON-LD schema block.
     Pass `new_content` as the new article HTML WITHOUT schema; the post's current
     schema <script> is automatically re-appended so structured data is not lost.
-    Use this for normal content edits on this site."""
+    Use this for normal content edits on this site. For a CUSTOM post type (e.g.
+    'service'), pass post_type."""
     _require_tier('paid')
     _apply_site(site)
-    p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
+    _base = _pt_base(post_type)
+    p = _v2("GET", f"/{_base}/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     blocks = _SCHEMA_RE.findall(raw)
     body = new_content
     if blocks and "application/ld+json" not in new_content:
         body = new_content.rstrip() + "\n\n" + "\n\n".join(blocks)
-    _v2("POST", f"/posts/{post_id}", payload={"content": body})
+    _v2("POST", f"/{_base}/{post_id}", payload={"content": body})
     return json.dumps({"post_id": post_id, "result": "body updated",
                        "schema_preserved": len(blocks)})
 
@@ -1302,22 +1318,25 @@ def bulk_schedule_posts(schedule_json: str, site: str = "") -> str:
 
 
 @mcp.tool()
-def duplicate_post(post_id: int, new_title: str = "", site: str = "") -> str:
+def duplicate_post(post_id: int, new_title: str = "", post_type: str = "", site: str = "") -> str:
     """Clone a post (great for templates): copies title, content, excerpt,
     categories and tags into a NEW draft. Pass new_title to rename the copy.
-    Returns the new post id."""
+    Returns the new post id. For a CUSTOM post type (e.g. 'service'), pass post_type -
+    the copy is created in the same type."""
     _require_tier('paid')
     _apply_site(site)
-    src = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
+    _base = _pt_base(post_type)
+    src = _v2("GET", f"/{_base}/{post_id}", params={"context": "edit"})
     payload = {
         "title": new_title or ((src.get("title") or {}).get("raw", "") + " (copy)"),
         "content": (src.get("content") or {}).get("raw", ""),
         "excerpt": (src.get("excerpt") or {}).get("raw", ""),
         "status": "draft",
-        "categories": src.get("categories", []),
-        "tags": src.get("tags", []),
     }
-    new = _v2("POST", "/posts", payload=payload)
+    if _base == "posts":
+        payload["categories"] = src.get("categories", [])
+        payload["tags"] = src.get("tags", [])
+    new = _v2("POST", f"/{_base}", payload=payload)
     return json.dumps(_slim_post(new), indent=2, ensure_ascii=False)
 
 
@@ -2917,7 +2936,7 @@ def _geo_score(sig):
 
 
 @mcp.tool()
-def geo_audit_post(post_id: int, target_queries: str = "", site: str = "") -> str:
+def geo_audit_post(post_id: int, target_queries: str = "", post_type: str = "", site: str = "") -> str:
     """GEO / AEO audit - how CITATION-READY a post is for AI answer engines
     (ChatGPT, Perplexity, Google AI Overviews, Gemini, Claude). Scores 8 dimensions
     0-100 (clear definitions, quotable statements, factual density, source
@@ -2926,9 +2945,9 @@ def geo_audit_post(post_id: int, target_queries: str = "", site: str = "") -> st
     your `target_queries` (comma-separated) - for each query, is there a standalone
     25-50 word answer a machine could quote? Returns measured scores + specific,
     actionable fixes. All numbers here are MEASURED from the content (not guessed);
-    anything inferred is labeled."""
+    anything inferred is labeled. For a CUSTOM post type (e.g. 'service'), pass post_type."""
     _apply_site(site)
-    p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
+    p = _v2("GET", f"/{_pt_base(post_type)}/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     title = (p.get("title") or {}).get("rendered", "")
     if not raw:
@@ -3019,7 +3038,8 @@ def geo_audit_post(post_id: int, target_queries: str = "", site: str = "") -> st
 
 
 @mcp.tool()
-def geo_optimize_post(post_id: int, optimized_html: str = "", target_queries: str = "", site: str = "") -> str:
+def geo_optimize_post(post_id: int, optimized_html: str = "", target_queries: str = "",
+                      post_type: str = "", site: str = "") -> str:
     """Make a post AI-CITATION-READY. Two ways to use it:
 
     1) PLAN MODE (optimized_html empty): returns the post's current body + a GEO
@@ -3035,7 +3055,8 @@ def geo_optimize_post(post_id: int, optimized_html: str = "", target_queries: st
     invent facts or fake sources."""
     _require_tier('paid')
     _apply_site(site)
-    p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
+    _base = _pt_base(post_type)
+    p = _v2("GET", f"/{_base}/{post_id}", params={"context": "edit"})
     raw = (p.get("content") or {}).get("raw", "")
     title = (p.get("title") or {}).get("rendered", "")
     if not raw and not optimized_html:
@@ -3043,7 +3064,7 @@ def geo_optimize_post(post_id: int, optimized_html: str = "", target_queries: st
 
     if not optimized_html:
         # PLAN MODE - hand back content + audit + rewrite brief.
-        audit = json.loads(geo_audit_post(post_id, target_queries))
+        audit = json.loads(geo_audit_post(post_id, target_queries, post_type=post_type))
         brief = [
             "Rewrite the body to be AI-citation-ready WITHOUT losing accuracy:",
             "1. Put a standalone 25-50 word definition of the topic near the very top "
@@ -3073,8 +3094,8 @@ def geo_optimize_post(post_id: int, optimized_html: str = "", target_queries: st
     body = optimized_html.rstrip()
     if schema_blocks and "application/ld+json" not in optimized_html:
         body += "\n\n" + "\n\n".join(schema_blocks)
-    _v2("POST", f"/posts/{post_id}", payload={"content": body})
-    after = json.loads(geo_audit_post(post_id, target_queries))
+    _v2("POST", f"/{_base}/{post_id}", payload={"content": body})
+    after = json.loads(geo_audit_post(post_id, target_queries, post_type=post_type))
     return json.dumps({
         "mode": "APPLIED", "post_id": post_id,
         "new_geo_score": after.get("geo_score"),
@@ -3342,13 +3363,14 @@ _H_RE = _re.compile(r'<h([1-6])\b[^>]*>(.*?)</h\1>', _re.IGNORECASE | _re.DOTALL
 
 
 @mcp.tool()
-def seo_audit_post(post_id: int, focus_keyword: str = "", site: str = "") -> str:
+def seo_audit_post(post_id: int, focus_keyword: str = "", post_type: str = "", site: str = "") -> str:
     """Full on-page SEO audit of ONE post in a single report: title length,
     excerpt/meta length, word count, heading structure (H1-H6), internal vs
     external link counts, images & missing alt, schema present?, and (if given)
-    focus_keyword usage in title/first paragraph/density. Returns issues + stats."""
+    focus_keyword usage in title/first paragraph/density. Returns issues + stats.
+    For a CUSTOM post type (e.g. 'service'), pass post_type."""
     _apply_site(site)
-    p = _v2("GET", f"/posts/{post_id}", params={"context": "edit"})
+    p = _v2("GET", f"/{_pt_base(post_type)}/{post_id}", params={"context": "edit"})
     title = (p.get("title") or {}).get("raw", "")
     excerpt = (p.get("excerpt") or {}).get("raw", "")
     raw = (p.get("content") or {}).get("raw", "")
